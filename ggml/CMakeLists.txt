@@ -79,6 +79,10 @@ option(BUILD_SHARED_LIBS           "ggml: build shared libraries" ${BUILD_SHARED
 option(GGML_BACKEND_DL             "ggml: build backends as dynamic libraries (requires BUILD_SHARED_LIBS)" OFF)
 set(GGML_BACKEND_DIR "" CACHE PATH "ggml: directory to load dynamic backends from (requires GGML_BACKEND_DL")
 
+
+
+
+
 #
 # option list
 #
@@ -466,4 +470,32 @@ if (MSVC)
         disable_msvc_warnings(test-opt)
         disable_msvc_warnings(test-pool)
     endif ()
+endif()
+
+
+# LUT experimental backend
+option(GGML_LUT "Enable LUT acceleration experiments" OFF)
+
+if (GGML_LUT)
+    add_compile_definitions(GGML_USE_LUT)
+    
+    add_library(ggml-lut SHARED
+        src/ggml-lut.cpp
+        src/ggml-lut-quant.cpp
+        src/ggml-lut-gemm.cpp
+    )
+    
+    target_include_directories(ggml-lut PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    
+    target_link_libraries(ggml-lut PUBLIC ggml-base)
+    
+    set_target_properties(ggml-lut PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+    
+    message(STATUS "GGML LUT: enabled")
 endif()

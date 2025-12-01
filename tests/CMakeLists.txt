@@ -226,3 +226,18 @@ target_link_libraries(${TEST_TARGET} PRIVATE llama)
 
 llama_build_and_test(test-alloc.cpp)
 target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
+
+# LUT experimental tests
+if (GGML_LUT)
+    add_executable(test-lut-gemm test-lut-gemm.cpp)
+    target_link_libraries(test-lut-gemm PRIVATE ggml ggml-lut)
+    add_test(NAME test-lut-gemm COMMAND test-lut-gemm)
+    
+    add_executable(test-lut-activation test-lut-activation.cpp)
+    target_link_libraries(test-lut-activation PRIVATE ggml ggml-lut)
+    add_test(NAME test-lut-activation COMMAND test-lut-activation)
+    
+    add_executable(test-lut-ffn-layer test-lut-ffn-layer.cpp)
+    target_link_libraries(test-lut-ffn-layer PRIVATE ggml ggml-lut)
+    add_test(NAME test-lut-ffn-layer COMMAND test-lut-ffn-layer)
+endif()

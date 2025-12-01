@@ -41,4 +41,10 @@ else()
             add_subdirectory(sycl)
         endif()
     endif()
+
+endif()
+
+# LUT benchmarking tools
+if (GGML_LUT)
+    add_subdirectory(lut-bench)
 endif()
