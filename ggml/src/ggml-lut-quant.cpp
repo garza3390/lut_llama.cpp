@@ -1,25 +1,25 @@
 #include "ggml-lut.h"
-
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
 
-// Weight quantization metadata
-
-// Internal metadata for quantized weights
+// Estructura de metadatos de cuantización de pesos (debe coincidir con ggml-lut-gemm.cpp)
 struct ggml_lut_weight_data {
-    uint8_t * w_q;      // Quantized weights (flattened, contiguous)
-    float   * scales;   // Per-group scales
+    uint8_t * w_q;      // Pesos cuantizados: índices LUT en [0, 2^W - 1]
+    float   * scales;   // Escalas por grupo (symmetric per-group)
     int       num_groups;
 };
 
-// Global side table for quantized weights
-// Key: pointer to original ggml_tensor (weights)
-// Value: quantized data + scales
-static std::unordered_map<const struct ggml_tensor *, ggml_lut_weight_data> g_weight_data;
+// Tabla global tensor -> datos de cuantización
+static std::unordered_map<const ggml_tensor *, ggml_lut_weight_data> g_weight_data;
 
-// Quantization: ggml_lut_quantize_weights
-
+// Cuantización de pesos (SIMÉTRICA SIGNED con zero-offset para LUT 2D)
+//   Rango real por grupo: [-absmax_g, +absmax_g]
+//   Rango entero centrado: q_centered ∈ [-qmax, +qmax],
+//   donde qmax = (2^(w_bits) - 1)/2
+//   Índice LUT: idx = q_centered + qmax  ∈ [0, 2^w_bits - 1]
+//   w_real ≈ q_centered * scale_g
+//   con scale_g = absmax_g / qmax
 void ggml_lut_quantize_weights(
     struct ggml_tensor * weights,
     const struct ggml_lut_config * config
@@ -29,41 +29,30 @@ void ggml_lut_quantize_weights(
     GGML_ASSERT(weights->type == GGML_TYPE_F32);
     GGML_ASSERT(ggml_is_contiguous(weights));
 
-    const int K          = (int) weights->ne[0];
-    const int N          = (int) weights->ne[1];
+    const int K = (int) weights->ne[0];
+    const int N = (int) weights->ne[1];
     const int total_size = K * N;
 
     const int group_size = config->group_size;
-    GGML_ASSERT(group_size > 0);
-
     const int num_groups = (total_size + group_size - 1) / group_size;
-    const int w_bits     = config->w_bits;
-    GGML_ASSERT(w_bits > 0 && w_bits <= 8);
 
-    const int   w_levels  = 1 << w_bits;
-    const float w_max_val = (float) (w_levels - 1);
+    const int w_bits   = config->w_bits;
+    const int w_levels = 1 << w_bits;               // 2^W
+    const int qmax     = (w_levels - 1) / 2;        // p.ej. 7 para W=4
 
     const float * w_data = (const float *) weights->data;
 
-    // Allocate quantized weight data
-    ggml_lut_weight_data qdata;
-    qdata.w_q       = new uint8_t[total_size];
-    qdata.scales    = new float[num_groups];
-    qdata.num_groups = num_groups;
+    // Reservar espacio para datos cuantizados
+    ggml_lut_weight_data qd;
+    qd.w_q        = new uint8_t[total_size];
+    qd.scales     = new float[num_groups];
+    qd.num_groups = num_groups;
 
-    // Symmetric per-group quantization (Phase 1b simplified scheme)
-    //
-    // This is a SIMPLIFIED quantization for experimentation:
-    // - Uses unsigned range [0, 2^w_bits - 1]
-    // - No zero-point
-    //
-    // Production-quality quantization would typically use signed ranges
-    // and more advanced calibration.
     for (int g = 0; g < num_groups; ++g) {
         const int start = g * group_size;
-        const int end   = (start + group_size < total_size) ? (start + group_size) : total_size;
+        const int end   = (start + group_size < total_size) ? start + group_size : total_size;
 
-        // Find absmax in this group
+        // absmax del grupo
         float absmax = 0.0f;
         for (int i = start; i < end; ++i) {
             float v  = w_data[i];
@@ -73,37 +62,42 @@ void ggml_lut_quantize_weights(
             }
         }
 
-        // Compute scale
-        float scale = absmax > 0.0f ? absmax / w_max_val : 1.0f;
-        qdata.scales[g] = scale;
+        // Evitar división por cero si el grupo es todo ceros
+        const float scale_g = (absmax > 0.0f) ? (absmax / (float) qmax) : 1.0f;
+        qd.scales[g] = scale_g;
 
-        // Quantize to [0, 2^w_bits - 1]
         for (int i = start; i < end; ++i) {
-            float v = w_data[i] / scale;
-            int   q = (int) (v >= 0.0f ? v + 0.5f : v - 0.5f);
+            float v = w_data[i] / scale_g;  // valor en espacio entero "ideal"
+            int   q_centered = (int) (v >= 0.0f ? v + 0.5f : v - 0.5f);
 
-            if (q < 0) {
-                q = 0;
-            } else if (q > w_levels - 1) {
-                q = w_levels - 1;
+            if (q_centered < -qmax) {
+                q_centered = -qmax;
+            } else if (q_centered > qmax) {
+                q_centered = qmax;
             }
 
-            qdata.w_q[i] = (uint8_t) q;
+            const int idx = q_centered + qmax; // índice LUT
+            qd.w_q[i] = (uint8_t) idx;
         }
     }
 
-    // Store in global side table (overwrite if already present)
-    g_weight_data[weights] = qdata;
+    // Guardar en tabla global
+    g_weight_data[weights] = qd;
 }
 
-// LUT building: ggml_lut_build_table
-
+// Construcción de LUT 2D
+//   LUT almacena SOLO el producto entero:
+//       lut2d[w_idx, a_idx] = q_w_centered * q_a_centered
+//   donde:
+//       q_w_centered = w_idx - w_zero
+//       q_a_centered = a_idx - a_zero
+//   El reescaleo usando scale_w[g] y scale_a[m] se hace en el kernel.
 void ggml_lut_build_table(
     int32_t * lut2d,
     int w_bits,
     int a_bits,
-    float scale_w,
-    float scale_x
+    float /*scale_w*/,
+    float /*scale_x*/
 ) {
     GGML_ASSERT(lut2d != NULL);
     GGML_ASSERT(w_bits > 0 && w_bits <= 8);
@@ -112,23 +106,20 @@ void ggml_lut_build_table(
     const int w_levels = 1 << w_bits;
     const int a_levels = 1 << a_bits;
 
-    // TRUE 2D LUT: lut2d[w_idx * a_levels + a_idx]
-    // Entry approximates: (w_idx * scale_w) * (a_idx * scale_x)
-    for (int w = 0; w < w_levels; ++w) {
-        for (int a = 0; a < a_levels; ++a) {
-            float w_val = (float) w * scale_w;
-            float a_val = (float) a * scale_x;
-            float prod  = w_val * a_val;
+    const int w_zero = (w_levels - 1) / 2;
+    const int a_zero = (a_levels - 1) / 2;
 
-            // Deterministic rounding to nearest integer
-            int32_t rounded = (int32_t) (prod >= 0.0f ? prod + 0.5f : prod - 0.5f);
-            lut2d[w * a_levels + a] = rounded;
+    for (int wi = 0; wi < w_levels; ++wi) {
+        const int q_w = wi - w_zero;
+
+        for (int ai = 0; ai < a_levels; ++ai) {
+            const int q_a = ai - a_zero;
+            lut2d[wi * a_levels + ai] = q_w * q_a;  // producto entero puro
         }
     }
 }
 
-// Accessors for GEMM and global cleanup
-
+// Acceso a datos de pesos cuantizados
 const ggml_lut_weight_data * ggml_lut_get_weight_data(const struct ggml_tensor * tensor) {
     auto it = g_weight_data.find(tensor);
     if (it == g_weight_data.end()) {
@@ -137,13 +128,11 @@ const ggml_lut_weight_data * ggml_lut_get_weight_data(const struct ggml_tensor *
     return &it->second;
 }
 
+// Liberar memoria global de cuantización
 void ggml_lut_free_quantized_weights(void) {
     for (auto & entry : g_weight_data) {
         delete[] entry.second.w_q;
         delete[] entry.second.scales;
-        entry.second.w_q    = nullptr;
-        entry.second.scales = nullptr;
-        entry.second.num_groups = 0;
     }
     g_weight_data.clear();
 }
