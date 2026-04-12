@@ -3,8 +3,9 @@
 #include <unordered_map>
 #include <cstring>
 
-// Forward declaration from ggml-lut-quant.cpp
+// Forward declarations from ggml-lut-quant.cpp / ggml-lut-gemm.cpp
 extern void ggml_lut_free_quantized_weights(void);
+extern "C" void ggml_lut_free_work_buffers(void);
 
 // Side table for tensor -> config mapping
 static std::unordered_map<const struct ggml_tensor *, struct ggml_lut_config> g_tensor_configs;
@@ -18,8 +19,8 @@ void ggml_lut_global_init(void) {
 }
 
 void ggml_lut_global_free(void) {
-    // Free quantized weight data and clear config map
-    ggml_lut_free_quantized_weights();
+    ggml_lut_free_quantized_weights();  // libera pesos cuantizados + cache LUT
+    ggml_lut_free_work_buffers();       // libera buffers de activaciones
     g_tensor_configs.clear();
     g_lut_initialized = false;
 }

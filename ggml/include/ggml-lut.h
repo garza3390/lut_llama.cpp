@@ -45,10 +45,21 @@ GGML_API bool ggml_lut_is_enabled(const struct ggml_tensor * tensor);
 
 /**
  * Quantize weights for LUT-based computation.
- * Uses symmetric per-group quantization: w_q = round(w / scale_w)
- * Stores quantized values and per-group scales in the tensor's extra data.
+ * Uses a custom symmetric per-group quantization scheme.
+ * Stores quantized values and per-group scales in a side table.
  */
 GGML_API void ggml_lut_quantize_weights(
+    struct ggml_tensor * weights,
+    const struct ggml_lut_config * config
+);
+
+/**
+ * Quantize weights using ggml's native Q4_0 scheme (block_q4_0).
+ * Extracts the same nibble indices [0,15] that the model uses, so
+ * LUT computation is directly comparable to ggml's own Q4_0 GEMM.
+ * Requires: config->w_bits == 4, K must be a multiple of 32 (QK4_0).
+ */
+GGML_API void ggml_lut_quantize_weights_q4_0(
     struct ggml_tensor * weights,
     const struct ggml_lut_config * config
 );
@@ -69,7 +80,8 @@ GGML_API void ggml_lut_build_table(
 /**
  * Compute GEMM using LUT acceleration: C = A * B
  * A: [K, M] activations
- * B: [K, N] weights (should be quantized via ggml_lut_quantize_weights)
+ * B: [K, N] weights (should be quantized via ggml_lut_quantize_weights or
+ *                    ggml_lut_quantize_weights_q4_0)
  * C: [N, M] output
  */
 GGML_API void ggml_lut_compute_gemm(
@@ -78,6 +90,13 @@ GGML_API void ggml_lut_compute_gemm(
     struct ggml_tensor * C,
     const struct ggml_lut_config * config
 );
+
+/**
+ * Get (or lazily build and cache) the LUT table for the given bit-widths.
+ * The table stores pure integer products: q_w_centered * q_a_centered.
+ * The table is kept alive until ggml_lut_global_free() is called.
+ */
+GGML_API const int32_t * ggml_lut_get_or_build_table(int w_bits, int a_bits);
 
 #ifdef __cplusplus
 }

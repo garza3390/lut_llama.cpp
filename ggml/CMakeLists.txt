@@ -488,6 +488,9 @@ if (GGML_LUT)
     target_include_directories(ggml-lut PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
+    target_include_directories(ggml-lut PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src   # ggml-common.h, ggml-quants.h para Q4_0
+    )
     
     target_link_libraries(ggml-lut PUBLIC ggml-base)
     

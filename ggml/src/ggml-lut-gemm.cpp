@@ -1,6 +1,10 @@
 #include "ggml-lut.h"
 #include <cstring>
 
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
 // Debe coincidir con la definición en ggml-lut-quant.cpp
 struct ggml_lut_weight_data {
     uint8_t * w_q;
@@ -9,11 +13,45 @@ struct ggml_lut_weight_data {
 };
 
 extern const ggml_lut_weight_data * ggml_lut_get_weight_data(const struct ggml_tensor * tensor);
+extern const int32_t * ggml_lut_get_or_build_table(int w_bits, int a_bits);
 
+// ---------------------------------------------------------------------------
+// Buffers de trabajo globales: grow-only, liberados en ggml_lut_global_free.
+// Evitan alloc/free en cada llamada a ggml_lut_compute_gemm.
+// ---------------------------------------------------------------------------
+static uint8_t * g_a_q       = nullptr;
+static float   * g_scales_a  = nullptr;
+static size_t    g_a_q_cap   = 0;
+static size_t    g_scales_cap = 0;
+
+static void lut_ensure_work_buffers(int K, int M) {
+    const size_t need_a_q    = (size_t) K * M;
+    const size_t need_scales = (size_t) M;
+
+    if (need_a_q > g_a_q_cap) {
+        delete[] g_a_q;
+        g_a_q     = new uint8_t[need_a_q];
+        g_a_q_cap = need_a_q;
+    }
+    if (need_scales > g_scales_cap) {
+        delete[] g_scales_a;
+        g_scales_a    = new float[need_scales];
+        g_scales_cap  = need_scales;
+    }
+}
+
+// Llamado desde ggml_lut_global_free (ggml-lut.cpp)
+extern "C" void ggml_lut_free_work_buffers(void) {
+    delete[] g_a_q;      g_a_q      = nullptr; g_a_q_cap   = 0;
+    delete[] g_scales_a; g_scales_a = nullptr; g_scales_cap = 0;
+}
+
+// ---------------------------------------------------------------------------
 // Cuantización de activaciones (SIMÉTRICA SIGNED, columna por columna)
 //   A: [K, M]
-//   a_q: índices LUT ∈ [0, 2^A − 1]
+//   a_q: índices LUT ∈ [0, 2^a_bits − 1]
 //   scales_a[m]: escala por columna m
+// ---------------------------------------------------------------------------
 static void ggml_lut_quantize_activations(
     const float * GGML_RESTRICT a_data,   // [K * M]
     uint8_t     * GGML_RESTRICT a_q,      // [K * M]
@@ -29,51 +67,63 @@ static void ggml_lut_quantize_activations(
     for (int m = 0; m < M; ++m) {
         float absmax = 0.0f;
 
-        // absmax de la columna m
         for (int k = 0; k < K; ++k) {
             float v  = a_data[k * M + m];
             float av = v >= 0.0f ? v : -v;
-            if (av > absmax) {
-                absmax = av;
-            }
+            if (av > absmax) { absmax = av; }
         }
 
-        float scale_a = (absmax > 0.0f) ? (absmax / qmax_f) : 1.0f;
+        const float scale_a = (absmax > 0.0f) ? (absmax / qmax_f) : 1.0f;
         scales_a[m] = scale_a;
 
         for (int k = 0; k < K; ++k) {
             float v = a_data[k * M + m] / scale_a;
             int   q_centered = (int) (v >= 0.0f ? v + 0.5f : v - 0.5f);
 
-            if (q_centered < -qmax) {
-                q_centered = -qmax;
-            } else if (q_centered > qmax) {
-                q_centered = qmax;
-            }
+            if (q_centered < -qmax) { q_centered = -qmax; }
+            else if (q_centered >  qmax) { q_centered =  qmax; }
 
-            const int idx = q_centered + qmax;  // índice LUT
-            a_q[k * M + m] = (uint8_t) idx;
+            a_q[k * M + m] = (uint8_t) (q_centered + qmax);
         }
     }
 }
 
-// Kernel GEMM usando LUT 2D y UN SOLO scale_w global:
+// ---------------------------------------------------------------------------
+// Kernel GEMM usando LUT 2D.
 //
-//   LUT contiene: lut2d[w_idx, a_idx] = q_w_centered * q_a_centered
+//   lut2d[w_idx * a_levels + a_idx] = q_w_centered * q_a_centered (int puro)
 //
-//   Para cada salida (n, m):
-//       acc_int = Σ_k LUT(q_w[n,k], q_a[k,m])
-//       y[n,m]  = acc_int * scale_w_global * scale_a[m]
+//   Para cada (n, m):
+//       acc_int = Σ_k lut2d[w_q[n,k], a_q[k,m]]
+//       out[m,n] = acc_int * scale_w_global * scale_a[m]
 //
-// Esto ignora los grupos de pesos en la dequantización efectiva, pero es
-// consistente y suficiente para la fase experimental.
+// Path AVX2: procesa 8 k por iteración con gather de 32 bits.
+// Fallback escalar para arquitecturas sin AVX2.
+// ---------------------------------------------------------------------------
+
+#if defined(__AVX2__)
+// Suma horizontal de un __m256i de 8 enteros de 32 bits → int64_t
+static inline int64_t hsum_epi32(__m256i v) {
+    __m128i lo  = _mm256_castsi256_si128(v);
+    __m128i hi  = _mm256_extracti128_si256(v, 1);
+    __m128i sum = _mm_add_epi32(lo, hi);
+    // sum = [a0+a4, a1+a5, a2+a6, a3+a7]
+    __m128i shuf = _mm_shuffle_epi32(sum, 0x4E);       // swap hi/lo 64-bit pairs
+    __m128i sums = _mm_add_epi32(sum, shuf);
+    // sums = [a+b, a+b, c+d, c+d]
+    __m128i shuf2 = _mm_shuffle_epi32(sums, 0xB1);    // swap adjacent 32-bit words
+    __m128i sums2 = _mm_add_epi32(sums, shuf2);
+    return (int64_t) _mm_cvtsi128_si32(sums2);
+}
+#endif
+
 static void lut_gemm_kernel(
     const uint8_t * GGML_RESTRICT w_q,         // [N * K]
     float          scale_w_global,             // escala global de pesos
     const uint8_t * GGML_RESTRICT a_q,         // [K * M]
     const float   * GGML_RESTRICT scales_a,    // [M]
     const int32_t * GGML_RESTRICT lut2d,       // [2^w_bits * 2^a_bits]
-    float         * GGML_RESTRICT out,         // [N * M]
+    float         * GGML_RESTRICT out,         // [N * M]  (out[m * N + n])
     int M, int N, int K,
     int a_bits
 ) {
@@ -81,25 +131,66 @@ static void lut_gemm_kernel(
 
     for (int m = 0; m < M; ++m) {
         const float scale_a_m = scales_a[m];
+        const float dequant   = scale_w_global * scale_a_m;
 
         for (int n = 0; n < N; ++n) {
             int64_t acc_int = 0;
 
-            for (int k = 0; k < K; ++k) {
-                const uint8_t w_idx = w_q[n * K + k];
-                const uint8_t a_idx = a_q[k * M + m];
+#if defined(__AVX2__)
+            {
+                __m256i acc_v = _mm256_setzero_si256();
+                const __m256i a_lev_v = _mm256_set1_epi32(a_levels);
+                int k = 0;
 
-                const int32_t lut_val = lut2d[(int) w_idx * a_levels + (int) a_idx];
-                acc_int += (int64_t) lut_val;
+                for (; k <= K - 8; k += 8) {
+                    // Cargar 8 bytes de índices de peso y activación
+                    const __m128i w_byte = _mm_loadl_epi64(
+                        (const __m128i *) (w_q + (size_t) n * K + k));
+                    const __m128i a_byte = _mm_loadl_epi64(
+                        (const __m128i *) (a_q + (size_t) k * M + m));
+
+                    // Expandir uint8 → int32
+                    const __m256i w_i32 = _mm256_cvtepu8_epi32(w_byte);
+                    const __m256i a_i32 = _mm256_cvtepu8_epi32(a_byte);
+
+                    // Índice LUT: w_i32 * a_levels + a_i32
+                    const __m256i idx = _mm256_add_epi32(
+                        _mm256_mullo_epi32(w_i32, a_lev_v),
+                        a_i32
+                    );
+
+                    // Gather de 8 entradas int32 del LUT
+                    const __m256i vals = _mm256_i32gather_epi32(lut2d, idx, 4);
+                    acc_v = _mm256_add_epi32(acc_v, vals);
+                }
+
+                acc_int = hsum_epi32(acc_v);
+
+                // Residuo escalar
+                for (; k < K; ++k) {
+                    const uint8_t w_idx = w_q[(size_t) n * K + k];
+                    const uint8_t a_idx = a_q[(size_t) k * M + m];
+                    acc_int += (int64_t) lut2d[(int) w_idx * a_levels + (int) a_idx];
+                }
             }
+#else
+            // Fallback escalar
+            for (int k = 0; k < K; ++k) {
+                const uint8_t w_idx = w_q[(size_t) n * K + k];
+                const uint8_t a_idx = a_q[(size_t) k * M + m];
+                acc_int += (int64_t) lut2d[(int) w_idx * a_levels + (int) a_idx];
+            }
+#endif
 
-            out[m * N + n] = (float) acc_int * scale_w_global * scale_a_m;
+            out[m * N + n] = (float) acc_int * dequant;
         }
     }
 }
 
+// ---------------------------------------------------------------------------
 // Orquestador principal LUT GEMM
 //   A: [K, M], B: [K, N], C: [N, M]
+// ---------------------------------------------------------------------------
 void ggml_lut_compute_gemm(
     const struct ggml_tensor * A,
     const struct ggml_tensor * B,
@@ -128,53 +219,27 @@ void ggml_lut_compute_gemm(
     const ggml_lut_weight_data * qdata = ggml_lut_get_weight_data(B);
     GGML_ASSERT(qdata != NULL && "Weights must be quantized before LUT GEMM");
 
-    // Por ahora usamos un solo scale_w global (el primero del tensor)
+    // Escala global de pesos (simplificación: primer grupo)
     const float scale_w_global = (qdata->num_groups > 0) ? qdata->scales[0] : 1.0f;
 
-    // Buffers temporales (fuera del núcleo “HLS-like”)
-    uint8_t * a_q      = new uint8_t[K * M];
-    float   * scales_a = new float[M];
+    // Rec 2: buffers de activaciones reutilizables (sin alloc/free por llamada)
+    lut_ensure_work_buffers(K, M);
 
-    const int w_levels = 1 << config->w_bits;
-    const int a_levels = 1 << config->a_bits;
-    int32_t * lut2d    = new int32_t[w_levels * a_levels];
-
-    // Cuantizar activaciones
     const float * a_data = (const float *) A->data;
-    ggml_lut_quantize_activations(
-        a_data,
-        a_q,
-        scales_a,
-        K,
-        M,
-        config->a_bits
-    );
+    ggml_lut_quantize_activations(a_data, g_a_q, g_scales_a, K, M, config->a_bits);
 
-    // Construir LUT 2D: LUT almacena solo q_w_centered * q_a_centered
-    // Las escalas reales se aplican fuera (scale_w_global y scale_a[m]).
-    ggml_lut_build_table(
-        lut2d,
-        config->w_bits,
-        config->a_bits,
-        /*scale_w=*/1.0f,
-        /*scale_x=*/1.0f
-    );
+    // Rec 1: obtener tabla LUT del cache (se construye solo la primera vez)
+    const int32_t * lut2d = ggml_lut_get_or_build_table(config->w_bits, config->a_bits);
 
     float * c_data = (float *) C->data;
     lut_gemm_kernel(
         qdata->w_q,
         scale_w_global,
-        a_q,
-        scales_a,
+        g_a_q,
+        g_scales_a,
         lut2d,
         c_data,
-        M,
-        N,
-        K,
+        M, N, K,
         config->a_bits
     );
-
-    delete[] a_q;
-    delete[] scales_a;
-    delete[] lut2d;
 }
