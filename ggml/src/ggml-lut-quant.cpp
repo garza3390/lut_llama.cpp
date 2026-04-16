@@ -234,5 +234,17 @@ void ggml_lut_free_quantized_weights(void) {
         delete[] entry.second.scales;
     }
     g_weight_data.clear();
-    g_lut_cache.clear();   // también limpiar el cache de tablas
+    g_lut_cache.clear();
+}
+
+// Limpia solo la tabla de pesos cuantizados, sin tocar el cache LUT ni los
+// buffers de activaciones.  Útil entre fases de benchmark cuando los
+// contextos ggml se recrean y los punteros de tensores pueden reutilizar
+// la misma dirección de memoria.
+void ggml_lut_clear_weights(void) {
+    for (auto & entry : g_weight_data) {
+        delete[] entry.second.w_q;
+        delete[] entry.second.scales;
+    }
+    g_weight_data.clear();
 }

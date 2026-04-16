@@ -98,6 +98,13 @@ GGML_API void ggml_lut_compute_gemm(
  */
 GGML_API const int32_t * ggml_lut_get_or_build_table(int w_bits, int a_bits);
 
+/**
+ * Clear only the quantized-weight side-table (not the LUT cache or work buffers).
+ * Useful between benchmark phases when ggml contexts are recreated and tensor
+ * pointers may alias old entries.
+ */
+GGML_API void ggml_lut_clear_weights(void);
+
 #ifdef __cplusplus
 }
 #endif
