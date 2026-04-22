@@ -30,14 +30,14 @@ ctest --test-dir build -R lut --output-on-failure
 ./build/bin/lut-bench-kernel
 
 # ── Benchmark con registro histórico ─────────────────────────
-# Guarda los resultados en ../llama2LutTestData/bench_log.csv
+# Guarda los resultados en llama2LutTestData/bench_log.csv
 # --label  : etiqueta descriptiva del estado del código en este run
-# --data-dir: directorio donde se acumula el historial (default: ../llama2LutTestData)
+# --data-dir: directorio donde se acumula el historial (default: llama2LutTestData)
 # --iters  : iteraciones por configuración (default: 10)
 
 ./build/bin/lut-bench-kernel \
     --label "baseline_inicial" \
-    --data-dir "../llama2LutTestData" \
+    --data-dir "llama2LutTestData" \
     --iters 10
 
 # Ejemplos de etiquetas útiles:
@@ -53,12 +53,12 @@ ctest --test-dir build -R lut --output-on-failure
 
 ./build/bin/lut-bench-suite \
     --label "post_optimizaciones" \
-    --data-dir "../llama2LutTestData" \
+    --data-dir "llama2LutTestData" \
     --iters 15
 
 # Opciones de la suite:
 #   --label    Etiqueta del run (ej: "avx2_q4_nativo")
-#   --data-dir Directorio de datos (default: ../llama2LutTestData)
+#   --data-dir Directorio de datos (default: llama2LutTestData)
 #   --iters    Iteraciones por config para estabilidad estadística (default: 15)
 #   --phases   Fases a correr, separadas por coma (default: 1,2,3,4)
 #   --help     Ver descripción completa de cada fase
@@ -78,7 +78,7 @@ ctest --test-dir build -R lut --output-on-failure
 pip install pandas matplotlib seaborn
 
 # Generar todas las gráficas (lee bench_log.csv del mismo directorio)
-cd ../llama2LutTestData
+cd llama2LutTestData
 python plot_results.py
 
 # Opciones del script
@@ -105,4 +105,4 @@ python plot_results.py --show                # mostrar en pantalla además de gu
 # 4. Run completo desatendido para llenar historial:
 #      ./build/bin/lut-bench-suite --label "descripcion_del_cambio"
 # 5. Visualizar evolución al terminar:
-#      cd ../llama2LutTestData && python plot_results.py --show
+#      cd llama2LutTestData && python plot_results.py --show

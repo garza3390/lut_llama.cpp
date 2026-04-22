@@ -9,7 +9,7 @@
  *   OE6      — identificar la configuración ideal para traspasar a Vitis HLS
  *
  * La suite corre completamente desatendida y acumula resultados en
- * ../llama2LutTestData/bench_log.csv usando el mismo formato que
+ * llama2LutTestData/bench_log.csv usando el mismo formato que
  * lut-bench-kernel.
  *
  * Fases:
@@ -21,7 +21,7 @@
  * Uso:
  *   ./build/bin/lut-bench-suite
  *   ./build/bin/lut-bench-suite --label "post_avx2" --iters 20
- *   ./build/bin/lut-bench-suite --phases 1,2        (solo fases 1 y 2)
+ *   ./build/bin/lut-bench-suite --phases 1,2
  *   ./build/bin/lut-bench-suite --data-dir "/ruta"
  *   ./build/bin/lut-bench-suite --help
  * =====================================================================
@@ -60,7 +60,7 @@ struct BenchResult {
     int M, N, K;
     int w_bits, a_bits, group_size;
     int lut_table_size;         // 2^(w_bits+a_bits)
-    int lut_table_bytes;        // × 4 bytes (int32)
+    int lut_table_bytes;        // lut_table_size * sizeof(int32_t)
     double f32_ms;
     double q4_ms;
     double lut_ms;
@@ -70,9 +70,9 @@ struct BenchResult {
     float  lut_max_err;
     float  q4_mse;
     float  lut_mse;
-    // Notas de relevancia HLS (informativo)
-    bool   fits_l1_cache;       // table_bytes < 32 KB (L1 típica)
-    bool   fits_single_bram36;  // table_bytes <= 32 KB (1 BRAM-36K del KV260)
+    // Flags para análisis HLS
+    bool   fits_l1_cache;       // table_bytes <= 32 KB
+    bool   fits_single_bram36;  // table_bytes <= 32 KB
 };
 
 struct MatrixConfig {
@@ -195,7 +195,7 @@ static BenchResult run_one(
     r.lut_table_size  = (1 << qcfg.w_bits) * (1 << qcfg.a_bits);
     r.lut_table_bytes = r.lut_table_size * (int)sizeof(int32_t);
     r.fits_l1_cache      = r.lut_table_bytes <= 32 * 1024;
-    r.fits_single_bram36 = r.lut_table_bytes <= 32 * 1024;  // BRAM-36K = 32 KB datos
+    r.fits_single_bram36 = r.lut_table_bytes <= 32 * 1024;
 
     // K debe ser múltiplo de QK4_0 (32) y de group_size
     if (mat.K % QK4_0 != 0 || mat.K % qcfg.group_size != 0) {
@@ -330,7 +330,7 @@ static void progress(const char * phase_name) {
 // ---------------------------------------------------------------------------
 // PHASE 1 — Barrido de precisión
 // Objetivo: encontrar qué combinaciones W×A×group_size dan error aceptable
-// Configuración fija: M=32, N=4096, K=4096 (GEMM mediano representativo)
+// Configuración fija: M=32, N=4096, K=4096
 // ---------------------------------------------------------------------------
 
 static std::vector<BenchResult> phase1(
@@ -513,7 +513,7 @@ static std::vector<BenchResult> phase4(
 
 int main(int argc, char ** argv) {
     std::string label    = "suite_run";
-    std::string data_dir = "../llama2LutTestData";
+    std::string data_dir = "llama2LutTestData";
     int iters = 15;
     std::set<int> run_phases = { 1, 2, 3, 4 };  // por defecto todas
 
@@ -532,7 +532,7 @@ int main(int argc, char ** argv) {
             printf(
                 "lut-bench-suite — Suite exhaustiva LUT-GEMM\n\n"
                 "  --label <str>     Etiqueta del run (default: suite_run)\n"
-                "  --data-dir <ruta> Directorio de datos (default: ../llama2LutTestData)\n"
+                "  --data-dir <ruta> Directorio de datos (default: llama2LutTestData)\n"
                 "  --iters <n>       Iteraciones por config (default: 15)\n"
                 "  --phases <n,n>    Fases a ejecutar, ej: 1,2  (default: 1,2,3,4)\n\n"
                 "Fases:\n"

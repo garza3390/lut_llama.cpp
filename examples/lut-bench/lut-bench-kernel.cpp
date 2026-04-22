@@ -170,7 +170,7 @@ static void save_results(
 int main(int argc, char ** argv) {
     // Argumentos opcionales: --label <str>  --data-dir <path>  --iters <n>
     std::string label    = "sin_etiqueta";
-    std::string data_dir = "../llama2LutTestData";   // relativo al repo root
+    std::string data_dir = "llama2LutTestData";   // relativo al CWD
     int iterations = 10;
 
     for (int i = 1; i < argc; ++i) {
@@ -180,7 +180,7 @@ int main(int argc, char ** argv) {
         else if (std::string(argv[i]) == "--help") {
             printf("Uso: lut-bench-kernel [--label <str>] [--data-dir <ruta>] [--iters <n>]\n");
             printf("  --label    Etiqueta descriptiva del run (ej: 'avx2_cache_lut')\n");
-            printf("  --data-dir Directorio donde guardar bench_log.csv (default: ../llama2LutTestData)\n");
+            printf("  --data-dir Directorio donde guardar bench_log.csv (default: llama2LutTestData)\n");
             printf("  --iters    Iteraciones por config (default: 10)\n");
             return 0;
         }

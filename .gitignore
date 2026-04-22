@@ -134,3 +134,7 @@ poetry.toml
 # IDE
 /*.code-workspace
 /.windsurf/
+
+# LUT bench — datos generados
+/llama2LutTestData/bench_log.csv
+/llama2LutTestData/graficas/
