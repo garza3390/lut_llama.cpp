@@ -506,13 +506,9 @@ def main():
                         help="Mostrar las gráficas además de guardarlas")
     args = parser.parse_args()
 
-    csv_path = Path(args.csv)
-    if not csv_path.is_absolute():
-        csv_path = Path(__file__).parent / csv_path
-
-    out_dir = Path(args.out)
-    if not out_dir.is_absolute():
-        out_dir = Path(__file__).parent / out_dir
+    # Rutas relativas se resuelven contra el CWD (convención Unix estándar).
+    csv_path = Path(args.csv).resolve()
+    out_dir  = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df = load_data(str(csv_path))
