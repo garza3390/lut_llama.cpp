@@ -138,3 +138,4 @@ poetry.toml
 # LUT bench — datos generados
 /llama2LutTestData/bench_log.csv
 /llama2LutTestData/graficas/
+/llama2LutTestData/test_v*/

@@ -96,13 +96,36 @@ python plot_results.py --show                # mostrar en pantalla además de gu
 # graficas/07_bar_f32_q4_lut.png         — comparativa tiempos F32 / Q4_0 / LUT
 # graficas/08_pareto_error_speedup.png   — frente de Pareto speedup ↔ error
 
-# ── Flujo de trabajo completo (cada iteración) ────────────────
-# 1. Modificar código (ggml-lut-gemm.cpp, ggml-lut-quant.cpp, etc.)
-# 2. Recompilar:
+# ── Flujo de trabajo versionado (recomendado) ────────────────
+# Cada cambio importante en el código se prueba con una corrida versionada.
+# El script run_version.sh:
+#   - crea una carpeta test_vN_<descripcion> con N auto-incremental
+#   - ejecuta kernel + suite con --data-dir apuntando a esa carpeta
+#   - genera las 8 gráficas dentro de la carpeta
+#   - guarda metadatos del run (git hash, host, timestamp)
+#
+# Flujo:
+# 1. Modificar código y recompilar:
 #      cmake --build build -j $(nproc)
-# 3. Run rápido para verificar que no rompiste nada:
-#      ./build/bin/lut-bench-kernel --label "verificacion"
-# 4. Run completo desatendido para llenar historial:
-#      ./build/bin/lut-bench-suite --label "descripcion_del_cambio"
-# 5. Visualizar evolución al terminar:
-#      cd llama2LutTestData && python plot_results.py --show
+# 2. Correr la versión:
+#      chmod +x llama2LutTestData/run_version.sh    # solo primera vez
+#      ./llama2LutTestData/run_version.sh "descripcion_del_cambio"
+# 3. Revisar los resultados:
+#      ls llama2LutTestData/test_v*/
+#      cat llama2LutTestData/test_vN_descripcion/run_info.txt
+
+# ── Flujo manual (avanzado) ──────────────────────────────────
+# Si se requiere control fino sobre labels o iteraciones:
+./build/bin/lut-bench-kernel \
+    --label "v1_kernel_baseline" \
+    --data-dir "llama2LutTestData/test_v1_baseline" \
+    --iters 10
+
+./build/bin/lut-bench-suite \
+    --label "v1_suite_baseline" \
+    --data-dir "llama2LutTestData/test_v1_baseline" \
+    --iters 15
+
+python llama2LutTestData/plot_results.py \
+    --csv llama2LutTestData/test_v1_baseline/bench_log.csv \
+    --out llama2LutTestData/test_v1_baseline/graficas

@@ -117,9 +117,15 @@ static inline int64_t hsum_epi32(__m256i v) {
 }
 #endif
 
+// Acumula por bloque aplicando la escala de cuantización del bloque
+// correspondiente. Para Q4_0 el bloque es de 32 pesos; para el esquema propio
+// el bloque coincide con config->group_size. En ambos casos
+// blocks_per_row * block_size == K.
 static void lut_gemm_kernel(
     const uint8_t * GGML_RESTRICT w_q,         // [N * K]
-    float          scale_w_global,             // escala global de pesos
+    const float   * GGML_RESTRICT scales_w,    // [N * blocks_per_row]
+    int             blocks_per_row,
+    int             block_size,
     const uint8_t * GGML_RESTRICT a_q,         // [K * M]
     const float   * GGML_RESTRICT scales_a,    // [M]
     const int32_t * GGML_RESTRICT lut2d,       // [2^w_bits * 2^a_bits]
@@ -131,58 +137,61 @@ static void lut_gemm_kernel(
 
     for (int m = 0; m < M; ++m) {
         const float scale_a_m = scales_a[m];
-        const float dequant   = scale_w_global * scale_a_m;
 
         for (int n = 0; n < N; ++n) {
-            int64_t acc_int = 0;
+            float acc_float = 0.0f;
+
+            for (int b = 0; b < blocks_per_row; ++b) {
+                const int k_start = b * block_size;
+                const int k_end   = k_start + block_size;
+                const float scale_w_b = scales_w[(size_t) n * blocks_per_row + b];
+
+                int64_t acc_int = 0;
 
 #if defined(__AVX2__)
-            {
-                __m256i acc_v = _mm256_setzero_si256();
-                const __m256i a_lev_v = _mm256_set1_epi32(a_levels);
-                int k = 0;
+                {
+                    __m256i acc_v = _mm256_setzero_si256();
+                    const __m256i a_lev_v = _mm256_set1_epi32(a_levels);
+                    int k = k_start;
 
-                for (; k <= K - 8; k += 8) {
-                    // Cargar 8 bytes de índices de peso y activación
-                    const __m128i w_byte = _mm_loadl_epi64(
-                        (const __m128i *) (w_q + (size_t) n * K + k));
-                    const __m128i a_byte = _mm_loadl_epi64(
-                        (const __m128i *) (a_q + (size_t) k * M + m));
+                    for (; k <= k_end - 8; k += 8) {
+                        const __m128i w_byte = _mm_loadl_epi64(
+                            (const __m128i *) (w_q + (size_t) n * K + k));
+                        const __m128i a_byte = _mm_loadl_epi64(
+                            (const __m128i *) (a_q + (size_t) k * M + m));
 
-                    // Expandir uint8 → int32
-                    const __m256i w_i32 = _mm256_cvtepu8_epi32(w_byte);
-                    const __m256i a_i32 = _mm256_cvtepu8_epi32(a_byte);
+                        const __m256i w_i32 = _mm256_cvtepu8_epi32(w_byte);
+                        const __m256i a_i32 = _mm256_cvtepu8_epi32(a_byte);
 
-                    // Índice LUT: w_i32 * a_levels + a_i32
-                    const __m256i idx = _mm256_add_epi32(
-                        _mm256_mullo_epi32(w_i32, a_lev_v),
-                        a_i32
-                    );
+                        const __m256i idx = _mm256_add_epi32(
+                            _mm256_mullo_epi32(w_i32, a_lev_v),
+                            a_i32
+                        );
 
-                    // Gather de 8 entradas int32 del LUT
-                    const __m256i vals = _mm256_i32gather_epi32(lut2d, idx, 4);
-                    acc_v = _mm256_add_epi32(acc_v, vals);
+                        const __m256i vals = _mm256_i32gather_epi32(lut2d, idx, 4);
+                        acc_v = _mm256_add_epi32(acc_v, vals);
+                    }
+
+                    acc_int = hsum_epi32(acc_v);
+
+                    for (; k < k_end; ++k) {
+                        const uint8_t w_idx = w_q[(size_t) n * K + k];
+                        const uint8_t a_idx = a_q[(size_t) k * M + m];
+                        acc_int += (int64_t) lut2d[(int) w_idx * a_levels + (int) a_idx];
+                    }
                 }
-
-                acc_int = hsum_epi32(acc_v);
-
-                // Residuo escalar
-                for (; k < K; ++k) {
+#else
+                for (int k = k_start; k < k_end; ++k) {
                     const uint8_t w_idx = w_q[(size_t) n * K + k];
                     const uint8_t a_idx = a_q[(size_t) k * M + m];
                     acc_int += (int64_t) lut2d[(int) w_idx * a_levels + (int) a_idx];
                 }
-            }
-#else
-            // Fallback escalar
-            for (int k = 0; k < K; ++k) {
-                const uint8_t w_idx = w_q[(size_t) n * K + k];
-                const uint8_t a_idx = a_q[(size_t) k * M + m];
-                acc_int += (int64_t) lut2d[(int) w_idx * a_levels + (int) a_idx];
-            }
 #endif
 
-            out[m * N + n] = (float) acc_int * dequant;
+                acc_float += (float) acc_int * scale_w_b;
+            }
+
+            out[m * N + n] = acc_float * scale_a_m;
         }
     }
 }
@@ -218,23 +227,29 @@ void ggml_lut_compute_gemm(
 
     const ggml_lut_weight_data * qdata = ggml_lut_get_weight_data(B);
     GGML_ASSERT(qdata != NULL && "Weights must be quantized before LUT GEMM");
+    GGML_ASSERT(qdata->num_groups > 0 && (qdata->num_groups % N) == 0 &&
+                "num_groups debe ser múltiplo de N (N bloques por fila)");
 
-    // Escala global de pesos (simplificación: primer grupo)
-    const float scale_w_global = (qdata->num_groups > 0) ? qdata->scales[0] : 1.0f;
+    // Derivar la topología de bloques. Para Q4_0 esto rinde block_size == 32;
+    // para el esquema propio, block_size == config->group_size.
+    const int blocks_per_row = qdata->num_groups / N;
+    const int block_size     = K / blocks_per_row;
+    GGML_ASSERT(blocks_per_row * block_size == K &&
+                "K debe ser múltiplo del tamaño de bloque de pesos");
 
-    // Rec 2: buffers de activaciones reutilizables (sin alloc/free por llamada)
     lut_ensure_work_buffers(K, M);
 
     const float * a_data = (const float *) A->data;
     ggml_lut_quantize_activations(a_data, g_a_q, g_scales_a, K, M, config->a_bits);
 
-    // Rec 1: obtener tabla LUT del cache (se construye solo la primera vez)
     const int32_t * lut2d = ggml_lut_get_or_build_table(config->w_bits, config->a_bits);
 
     float * c_data = (float *) C->data;
     lut_gemm_kernel(
         qdata->w_q,
-        scale_w_global,
+        qdata->scales,
+        blocks_per_row,
+        block_size,
         g_a_q,
         g_scales_a,
         lut2d,
