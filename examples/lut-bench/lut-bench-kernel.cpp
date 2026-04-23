@@ -227,6 +227,10 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "Saltando K=%d (no múltiplo de %d)\n", cfg.K, QK4_0);
             continue;
         }
+        if (cfg.w_bits != 4) {
+            fprintf(stderr, "Saltando w_bits=%d: solo W4 comparable con Q4_0 nativo\n", cfg.w_bits);
+            continue;
+        }
 
         ggml_lut_config lut_cfg;
         lut_cfg.w_bits     = cfg.w_bits;
