@@ -25,7 +25,8 @@
 struct BenchResult {
     int M, N, K;
     int w_bits, a_bits, group_size;
-    int lut_table_size;    // 2^(w_bits + a_bits)
+    int lut_table_size;         // 2^(w_bits + a_bits)
+    int lut_table_bytes;        // lut_table_size * sizeof(int32_t)
     double f32_ms;
     double q4_ms;
     double lut_ms;
@@ -35,6 +36,8 @@ struct BenchResult {
     float  lut_max_err;
     float  q4_mse;
     float  lut_mse;
+    bool   fits_l1_cache;       // table_bytes <= 32 KB
+    bool   fits_single_bram36;  // table_bytes <= 32 KB
 };
 
 // ---------------------------------------------------------------------------
@@ -123,11 +126,12 @@ static std::string get_timestamp() {
 // ---------------------------------------------------------------------------
 static const char * CSV_HEADER =
     "timestamp,label,"
-    "M,N,K,w_bits,a_bits,group_size,lut_table_size,"
+    "M,N,K,w_bits,a_bits,group_size,lut_table_size,lut_table_bytes,"
     "f32_ms,q4_ms,lut_ms,"
     "q4_speedup,lut_speedup,"
     "q4_max_err,lut_max_err,"
-    "q4_mse,lut_mse\n";
+    "q4_mse,lut_mse,"
+    "fits_l1_cache,fits_single_bram36\n";
 
 static void save_results(
     const std::string & data_dir,
@@ -155,11 +159,13 @@ static void save_results(
           << label << ","
           << r.M << "," << r.N << "," << r.K << ","
           << r.w_bits << "," << r.a_bits << "," << r.group_size << ","
-          << r.lut_table_size << ","
+          << r.lut_table_size << "," << r.lut_table_bytes << ","
           << r.f32_ms << "," << r.q4_ms << "," << r.lut_ms << ","
           << r.q4_speedup << "," << r.lut_speedup << ","
           << r.q4_max_err << "," << r.lut_max_err << ","
-          << r.q4_mse << "," << r.lut_mse << "\n";
+          << r.q4_mse << "," << r.lut_mse << ","
+          << (r.fits_l1_cache ? 1 : 0) << ","
+          << (r.fits_single_bram36 ? 1 : 0) << "\n";
     }
     printf("[LUT bench] Resultados guardados en: %s\n", csv_path.c_str());
 }
@@ -295,7 +301,10 @@ int main(int argc, char ** argv) {
         BenchResult r;
         r.M = cfg.M; r.N = cfg.N; r.K = cfg.K;
         r.w_bits = cfg.w_bits; r.a_bits = cfg.a_bits; r.group_size = cfg.group_size;
-        r.lut_table_size = (1 << cfg.w_bits) * (1 << cfg.a_bits);
+        r.lut_table_size     = (1 << cfg.w_bits) * (1 << cfg.a_bits);
+        r.lut_table_bytes    = r.lut_table_size * (int) sizeof(int32_t);
+        r.fits_l1_cache      = r.lut_table_bytes <= 32 * 1024;
+        r.fits_single_bram36 = r.lut_table_bytes <= 32 * 1024;
         r.f32_ms     = f32_ms;
         r.q4_ms      = q4_ms;
         r.lut_ms     = lut_ms;
