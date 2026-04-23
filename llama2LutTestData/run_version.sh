@@ -85,3 +85,17 @@ echo ""
 echo "  CSV       : $VERSION_DIR/bench_log.csv"
 echo "  Gráficas  : $VERSION_DIR/graficas/"
 echo "  Metadatos : $VERSION_DIR/run_info.txt"
+
+# Sincronización opcional con carpeta Windows (workflow WSL).
+# Si la ruta existe, copia la carpeta completa de la versión para análisis.
+# Puede sobrescribirse con la variable de entorno LUT_SYNC_DIR.
+SYNC_DIR="${LUT_SYNC_DIR:-/mnt/c/Users/USUARIO/OneDrive/Escritorio/Llama2/llama2LutTestData}"
+if [ -d "$(dirname "$SYNC_DIR")" ]; then
+    mkdir -p "$SYNC_DIR"
+    dest="$SYNC_DIR/$(basename "$VERSION_DIR")"
+    rm -rf "$dest"
+    cp -r "$VERSION_DIR" "$dest"
+    echo ""
+    echo "[run_version] Sincronizado a Windows:"
+    echo "              $dest"
+fi

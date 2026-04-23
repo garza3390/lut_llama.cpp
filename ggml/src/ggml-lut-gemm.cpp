@@ -24,9 +24,9 @@ static float   * g_scales_a  = nullptr;
 static size_t    g_a_q_cap   = 0;
 static size_t    g_scales_cap = 0;
 
-static void lut_ensure_work_buffers(int K, int M) {
+static void lut_ensure_work_buffers(int K, int M, int blocks_per_row_a) {
     const size_t need_a_q    = (size_t) K * M;
-    const size_t need_scales = (size_t) M;
+    const size_t need_scales = (size_t) M * blocks_per_row_a;
 
     if (need_a_q > g_a_q_cap) {
         delete[] g_a_q;
@@ -47,47 +47,55 @@ extern "C" void ggml_lut_free_work_buffers(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Cuantización de activaciones con convención Q_0 (asimétrica, column-wise).
+// Cuantización de activaciones con convención Q_0 (asimétrica, por bloque).
 //   A: [K, M]
 //   a_q: índices LUT ∈ [0, 2^a_bits − 1]
-//   scales_a[m]: escala por columna m
+//   scales_a[m * blocks_per_row_a + b]: escala del bloque b dentro de la
+//   columna m. Cada bloque agrupa block_size_a elementos.
 //
-// q_signed ∈ [-2^(a_bits-1), +2^(a_bits-1) - 1], idx = q_signed + 2^(a_bits-1)
-// La escala se calcula como absmax / q_pos_max para preservar el valor
-// positivo extremo sin clamping.
+// El esquema refleja Q8_0 nativo de ggml: absmax local por bloque. Esto
+// evita que un outlier en la columna infle la escala de todos los demás
+// elementos, lo que reduce el error de cuantización frente a un esquema
+// por columna.
 // ---------------------------------------------------------------------------
 static void ggml_lut_quantize_activations(
     const float * GGML_RESTRICT a_data,   // [K * M]
     uint8_t     * GGML_RESTRICT a_q,      // [K * M]
-    float       * GGML_RESTRICT scales_a, // [M]
+    float       * GGML_RESTRICT scales_a, // [M * blocks_per_row_a]
     int K,
     int M,
-    int a_bits
+    int a_bits,
+    int blocks_per_row_a,
+    int block_size_a
 ) {
-    const int   q_neg_max = 1 << (a_bits - 1);      // |valor mínimo|, p.ej. 128
-    const int   q_pos_max = q_neg_max - 1;          // valor máximo positivo, p.ej. 127
+    const int   q_neg_max = 1 << (a_bits - 1);
+    const int   q_pos_max = q_neg_max - 1;
     const float q_pos_f   = (float) q_pos_max;
 
     for (int m = 0; m < M; ++m) {
-        float absmax = 0.0f;
+        for (int b = 0; b < blocks_per_row_a; ++b) {
+            const int k_start = b * block_size_a;
+            const int k_end   = k_start + block_size_a;
 
-        for (int k = 0; k < K; ++k) {
-            float v  = a_data[k * M + m];
-            float av = v >= 0.0f ? v : -v;
-            if (av > absmax) { absmax = av; }
-        }
+            float absmax = 0.0f;
+            for (int k = k_start; k < k_end; ++k) {
+                float v  = a_data[(size_t) k * M + m];
+                float av = v >= 0.0f ? v : -v;
+                if (av > absmax) { absmax = av; }
+            }
 
-        const float scale_a = (absmax > 0.0f) ? (absmax / q_pos_f) : 1.0f;
-        scales_a[m] = scale_a;
+            const float scale_a = (absmax > 0.0f) ? (absmax / q_pos_f) : 1.0f;
+            scales_a[(size_t) m * blocks_per_row_a + b] = scale_a;
 
-        for (int k = 0; k < K; ++k) {
-            float v = a_data[k * M + m] / scale_a;
-            int   q_centered = (int) (v >= 0.0f ? v + 0.5f : v - 0.5f);
+            for (int k = k_start; k < k_end; ++k) {
+                float v = a_data[(size_t) k * M + m] / scale_a;
+                int   q_centered = (int) (v >= 0.0f ? v + 0.5f : v - 0.5f);
 
-            if (q_centered < -q_neg_max) { q_centered = -q_neg_max; }
-            else if (q_centered >  q_pos_max) { q_centered =  q_pos_max; }
+                if (q_centered < -q_neg_max) { q_centered = -q_neg_max; }
+                else if (q_centered >  q_pos_max) { q_centered =  q_pos_max; }
 
-            a_q[k * M + m] = (uint8_t) (q_centered + q_neg_max);
+                a_q[(size_t) k * M + m] = (uint8_t) (q_centered + q_neg_max);
+            }
         }
     }
 }
@@ -121,17 +129,17 @@ static inline int64_t hsum_epi32(__m256i v) {
 }
 #endif
 
-// Acumula por bloque aplicando la escala de cuantización del bloque
-// correspondiente. Para Q4_0 el bloque es de 32 pesos; para el esquema propio
-// el bloque coincide con config->group_size. En ambos casos
-// blocks_per_row * block_size == K.
+// Acumula por bloque aplicando las escalas del bloque de pesos y del
+// bloque de activaciones correspondientes. Tanto pesos como activaciones
+// quedan en bloques de LUT_ACT_BLOCK_SIZE == 32 elementos, alineados
+// con QK4_0 y con el esquema Q8_0 de ggml.
 static void lut_gemm_kernel(
     const uint8_t * GGML_RESTRICT w_q,         // [N * K]
     const float   * GGML_RESTRICT scales_w,    // [N * blocks_per_row]
+    const uint8_t * GGML_RESTRICT a_q,         // [K * M]
+    const float   * GGML_RESTRICT scales_a,    // [M * blocks_per_row]
     int             blocks_per_row,
     int             block_size,
-    const uint8_t * GGML_RESTRICT a_q,         // [K * M]
-    const float   * GGML_RESTRICT scales_a,    // [M]
     const int32_t * GGML_RESTRICT lut2d,       // [2^w_bits * 2^a_bits]
     float         * GGML_RESTRICT out,         // [N * M]  (out[m * N + n])
     int M, int N, int K,
@@ -140,8 +148,6 @@ static void lut_gemm_kernel(
     const int a_levels = 1 << a_bits;
 
     for (int m = 0; m < M; ++m) {
-        const float scale_a_m = scales_a[m];
-
         for (int n = 0; n < N; ++n) {
             float acc_float = 0.0f;
 
@@ -149,6 +155,7 @@ static void lut_gemm_kernel(
                 const int k_start = b * block_size;
                 const int k_end   = k_start + block_size;
                 const float scale_w_b = scales_w[(size_t) n * blocks_per_row + b];
+                const float scale_a_b = scales_a[(size_t) m * blocks_per_row + b];
 
                 int64_t acc_int = 0;
 
@@ -192,10 +199,10 @@ static void lut_gemm_kernel(
                 }
 #endif
 
-                acc_float += (float) acc_int * scale_w_b;
+                acc_float += (float) acc_int * scale_w_b * scale_a_b;
             }
 
-            out[m * N + n] = acc_float * scale_a_m;
+            out[m * N + n] = acc_float;
         }
     }
 }
@@ -234,17 +241,23 @@ void ggml_lut_compute_gemm(
     GGML_ASSERT(qdata->num_groups > 0 && (qdata->num_groups % N) == 0 &&
                 "num_groups debe ser múltiplo de N (N bloques por fila)");
 
-    // Derivar la topología de bloques. Para Q4_0 esto rinde block_size == 32;
-    // para el esquema propio, block_size == config->group_size.
+    // Topología de bloques para pesos. Para Q4_0 es block_size == 32.
     const int blocks_per_row = qdata->num_groups / N;
     const int block_size     = K / blocks_per_row;
     GGML_ASSERT(blocks_per_row * block_size == K &&
                 "K debe ser múltiplo del tamaño de bloque de pesos");
 
-    lut_ensure_work_buffers(K, M);
+    // Activaciones usan el mismo tamaño de bloque que los pesos, de modo que
+    // cada par (w_block, a_block) comparte el mismo rango de k.
+    const int blocks_per_row_a = blocks_per_row;
+    const int block_size_a     = block_size;
+
+    lut_ensure_work_buffers(K, M, blocks_per_row_a);
 
     const float * a_data = (const float *) A->data;
-    ggml_lut_quantize_activations(a_data, g_a_q, g_scales_a, K, M, config->a_bits);
+    ggml_lut_quantize_activations(
+        a_data, g_a_q, g_scales_a, K, M, config->a_bits,
+        blocks_per_row_a, block_size_a);
 
     const int32_t * lut2d = ggml_lut_get_or_build_table(config->w_bits, config->a_bits);
 
@@ -252,10 +265,10 @@ void ggml_lut_compute_gemm(
     lut_gemm_kernel(
         qdata->w_q,
         qdata->scales,
-        blocks_per_row,
-        block_size,
         g_a_q,
         g_scales_a,
+        blocks_per_row,
+        block_size,
         lut2d,
         c_data,
         M, N, K,
