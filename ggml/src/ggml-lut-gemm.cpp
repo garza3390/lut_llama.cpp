@@ -47,10 +47,14 @@ extern "C" void ggml_lut_free_work_buffers(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Cuantización de activaciones (SIMÉTRICA SIGNED, columna por columna)
+// Cuantización de activaciones con convención Q_0 (asimétrica, column-wise).
 //   A: [K, M]
 //   a_q: índices LUT ∈ [0, 2^a_bits − 1]
 //   scales_a[m]: escala por columna m
+//
+// q_signed ∈ [-2^(a_bits-1), +2^(a_bits-1) - 1], idx = q_signed + 2^(a_bits-1)
+// La escala se calcula como absmax / q_pos_max para preservar el valor
+// positivo extremo sin clamping.
 // ---------------------------------------------------------------------------
 static void ggml_lut_quantize_activations(
     const float * GGML_RESTRICT a_data,   // [K * M]
@@ -60,9 +64,9 @@ static void ggml_lut_quantize_activations(
     int M,
     int a_bits
 ) {
-    const int   a_levels = 1 << a_bits;
-    const int   qmax     = (a_levels - 1) / 2;
-    const float qmax_f   = (float) qmax;
+    const int   q_neg_max = 1 << (a_bits - 1);      // |valor mínimo|, p.ej. 128
+    const int   q_pos_max = q_neg_max - 1;          // valor máximo positivo, p.ej. 127
+    const float q_pos_f   = (float) q_pos_max;
 
     for (int m = 0; m < M; ++m) {
         float absmax = 0.0f;
@@ -73,17 +77,17 @@ static void ggml_lut_quantize_activations(
             if (av > absmax) { absmax = av; }
         }
 
-        const float scale_a = (absmax > 0.0f) ? (absmax / qmax_f) : 1.0f;
+        const float scale_a = (absmax > 0.0f) ? (absmax / q_pos_f) : 1.0f;
         scales_a[m] = scale_a;
 
         for (int k = 0; k < K; ++k) {
             float v = a_data[k * M + m] / scale_a;
             int   q_centered = (int) (v >= 0.0f ? v + 0.5f : v - 0.5f);
 
-            if (q_centered < -qmax) { q_centered = -qmax; }
-            else if (q_centered >  qmax) { q_centered =  qmax; }
+            if (q_centered < -q_neg_max) { q_centered = -q_neg_max; }
+            else if (q_centered >  q_pos_max) { q_centered =  q_pos_max; }
 
-            a_q[k * M + m] = (uint8_t) (q_centered + qmax);
+            a_q[k * M + m] = (uint8_t) (q_centered + q_neg_max);
         }
     }
 }

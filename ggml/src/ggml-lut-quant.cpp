@@ -51,12 +51,11 @@ const int32_t * ggml_lut_get_or_build_table(int w_bits, int a_bits) {
 }
 
 // ---------------------------------------------------------------------------
-// Cuantización de pesos — esquema propio (SIMÉTRICA SIGNED, per-group)
+// Cuantización de pesos — esquema propio (convención Q_0, per-group).
 //
-// Rango real por grupo: [-absmax_g, +absmax_g]
-// Rango entero centrado: q_centered ∈ [-qmax, +qmax]
-//   qmax = (2^w_bits - 1) / 2
-// Índice LUT: idx = q_centered + qmax  ∈ [0, 2^w_bits - 1]
+// Rango entero centrado: q_signed ∈ [-2^(w_bits-1), +2^(w_bits-1) - 1]
+// Índice LUT: idx = q_signed + 2^(w_bits-1)  ∈ [0, 2^w_bits - 1]
+// Escala: absmax / q_pos_max para preservar el extremo positivo sin clamp.
 // ---------------------------------------------------------------------------
 void ggml_lut_quantize_weights(
     struct ggml_tensor * weights,
@@ -74,9 +73,9 @@ void ggml_lut_quantize_weights(
     const int group_size = config->group_size;
     const int num_groups = (total_size + group_size - 1) / group_size;
 
-    const int w_bits   = config->w_bits;
-    const int w_levels = 1 << w_bits;
-    const int qmax     = (w_levels - 1) / 2;
+    const int w_bits    = config->w_bits;
+    const int q_neg_max = 1 << (w_bits - 1);
+    const int q_pos_max = q_neg_max - 1;
 
     const float * w_data = (const float *) weights->data;
 
@@ -95,15 +94,15 @@ void ggml_lut_quantize_weights(
             if (av > absmax) { absmax = av; }
         }
 
-        const float scale_g = (absmax > 0.0f) ? (absmax / (float) qmax) : 1.0f;
+        const float scale_g = (absmax > 0.0f) ? (absmax / (float) q_pos_max) : 1.0f;
         qd.scales[g] = scale_g;
 
         for (int i = start; i < end; ++i) {
             float v          = w_data[i] / scale_g;
             int   q_centered = (int) (v >= 0.0f ? v + 0.5f : v - 0.5f);
-            if (q_centered < -qmax) { q_centered = -qmax; }
-            else if (q_centered > qmax) { q_centered = qmax; }
-            qd.w_q[i] = (uint8_t) (q_centered + qmax);
+            if (q_centered < -q_neg_max) { q_centered = -q_neg_max; }
+            else if (q_centered > q_pos_max) { q_centered = q_pos_max; }
+            qd.w_q[i] = (uint8_t) (q_centered + q_neg_max);
         }
     }
 
@@ -187,13 +186,18 @@ void ggml_lut_quantize_weights_q4_0(
 }
 
 // ---------------------------------------------------------------------------
-// Construcción de LUT 2D (almacena solo el producto entero centrado)
+// Construcción de LUT 2D (almacena solo el producto entero centrado).
 //
 //   lut2d[w_idx * a_levels + a_idx] = q_w_centered * q_a_centered
 //   donde q_centered = idx - zero_offset
 //
-// Las escalas reales (scale_w, scale_x) se aplican fuera del kernel,
-// por lo que esta función las ignora (parámetros reservados para compatibilidad).
+// Convención Q_0 (compatible con Q4_0 / Q8_0 de ggml):
+//   zero_offset = 2^(bits-1)
+//   q_signed ∈ [-2^(bits-1), +2^(bits-1) - 1]
+//
+// Para w_bits=4 esto da q_w = idx - 8, exactamente el mapeo que usa Q4_0.
+// Las escalas reales se aplican fuera del kernel, por lo que esta función
+// las ignora.
 // ---------------------------------------------------------------------------
 void ggml_lut_build_table(
     int32_t * lut2d,
@@ -208,8 +212,8 @@ void ggml_lut_build_table(
 
     const int w_levels = 1 << w_bits;
     const int a_levels = 1 << a_bits;
-    const int w_zero   = (w_levels - 1) / 2;
-    const int a_zero   = (a_levels - 1) / 2;
+    const int w_zero   = 1 << (w_bits - 1);
+    const int a_zero   = 1 << (a_bits - 1);
 
     for (int wi = 0; wi < w_levels; ++wi) {
         const int q_w = wi - w_zero;

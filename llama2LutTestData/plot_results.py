@@ -1,16 +1,15 @@
 """
-plot_results.py — Visualización del historial de benchmarks LUT-GEMM
-=====================================================================
+plot_results.py — Visualización del historial de benchmarks LUT-GEMM.
 
-Lee bench_log.csv (generado por lut-bench-kernel) y produce un conjunto
-de gráficas que documentan la evolución del rendimiento y la precisión
-a lo largo de las iteraciones del proyecto.
+Lee bench_log.csv y produce ocho gráficas estandarizadas que documentan
+la evolución del rendimiento y la precisión a lo largo de las iteraciones.
 
 Uso:
-    python plot_results.py                      # lee ./bench_log.csv
-    python plot_results.py --csv otra.csv       # archivo específico
-    python plot_results.py --out graficas/      # directorio de salida
-    python plot_results.py --show               # mostrar en pantalla además de guardar
+    python plot_results.py
+    python plot_results.py --csv ruta/bench_log.csv
+    python plot_results.py --out graficas/
+    python plot_results.py --show
+    python plot_results.py --run "v2_suite_..."        # filtrar un run
 
 Dependencias:
     pip install pandas matplotlib seaborn
@@ -18,18 +17,84 @@ Dependencias:
 
 import argparse
 import os
+import re
 import sys
-import pandas as pd
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import numpy as np
+import pandas as pd
 import seaborn as sns
-from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Configuración visual global
 # ---------------------------------------------------------------------------
-sns.set_theme(style="whitegrid", palette="tab10", font_scale=1.1)
-FIGURE_DPI = 150
+sns.set_theme(
+    style="whitegrid",
+    palette="mako",
+    context="notebook",
+    font_scale=1.05,
+)
+plt.rcParams.update({
+    "figure.dpi": 120,
+    "savefig.dpi": 150,
+    "savefig.bbox": "tight",
+    "axes.titlesize": 13,
+    "axes.titleweight": "semibold",
+    "axes.labelsize": 11,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "legend.frameon": True,
+    "legend.fancybox": True,
+    "legend.framealpha": 0.85,
+    "legend.edgecolor": "#cccccc",
+    "legend.fontsize": 9,
+    "legend.title_fontsize": 9,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "grid.alpha": 0.35,
+})
+
+FIGSIZE_WIDE = (12, 5.5)
+FIGSIZE_SQR  = (8, 5.5)
+
+
+# ---------------------------------------------------------------------------
+# Helpers de etiquetas
+# ---------------------------------------------------------------------------
+_PHASE_RE   = re.compile(r"^phase\d+_")
+_RUN_PREFIX = re.compile(r"^v\d+_(kernel|suite)_")
+
+
+def short_label(full: str) -> str:
+    """Reduce un label largo tipo 'vN_suite_desc|phaseK_XYZ' a 'XYZ'."""
+    s = full.split("|", 1)[-1]
+    s = _PHASE_RE.sub("", s)
+    s = _RUN_PREFIX.sub("", s)
+    return s
+
+
+def run_of(full: str) -> str:
+    """Extrae solo el prefijo del run (antes de '|')."""
+    return full.split("|", 1)[0]
+
+
+def matrix_tag(row) -> str:
+    return f"M{row['M']}·N{row['N']}·K{row['K']}"
+
+
+def config_tag(row) -> str:
+    return f"W{row['w_bits']}A{row['a_bits']} g{row['group_size']}"
+
+
+def legend_outside(ax, title=None, ncol=1):
+    """Coloca la leyenda a la derecha del axis, fuera del área de ploteo."""
+    ax.legend(
+        title=title, loc="upper left", bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0, ncol=ncol,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Carga y preparación del CSV
@@ -37,183 +102,221 @@ FIGURE_DPI = 150
 
 def load_data(csv_path: str) -> pd.DataFrame:
     if not os.path.exists(csv_path):
-        print(f"[ERROR] No se encontró el archivo: {csv_path}")
-        print("  Ejecuta primero: ./build/bin/lut-bench-kernel --label <nombre>")
+        print(f"[ERROR] No se encontró el archivo: {csv_path}", file=sys.stderr)
+        print("  Ejecuta primero ./build/bin/lut-bench-kernel o la suite.",
+              file=sys.stderr)
         sys.exit(1)
 
     df = pd.read_csv(csv_path, parse_dates=["timestamp"])
 
-    # Columnas derivadas útiles
-    df["config"] = (
-        "W" + df["w_bits"].astype(str) +
-        "A" + df["a_bits"].astype(str) +
-        "_g" + df["group_size"].astype(str)
-    )
-    df["matrix"] = (
-        "M" + df["M"].astype(str) +
-        "N" + df["N"].astype(str) +
-        "K" + df["K"].astype(str)
-    )
-    df["lut_table_size_label"] = "2^" + (df["w_bits"] + df["a_bits"]).astype(str) + \
-                                  " (" + df["lut_table_size"].astype(str) + ")"
-    df["run_idx"] = df.groupby("label", sort=False).ngroup()
+    df["config"]      = df.apply(config_tag, axis=1)
+    df["matrix"]      = df.apply(matrix_tag, axis=1)
+    df["short_label"] = df["label"].map(short_label)
+    df["run"]         = df["label"].map(run_of)
 
-    # Orden cronológico de labels según primera aparición
-    label_order = df.drop_duplicates("label").sort_values("timestamp")["label"].tolist()
-    df["label"] = pd.Categorical(df["label"], categories=label_order, ordered=True)
+    run_order = (
+        df.drop_duplicates("run")
+          .sort_values("timestamp")["run"].tolist()
+    )
+    df["run"] = pd.Categorical(df["run"], categories=run_order, ordered=True)
 
-    print(f"[OK] {len(df)} filas cargadas | {df['label'].nunique()} runs | "
-          f"{df['config'].nunique()} configuraciones")
+    print(f"[OK] {len(df)} filas  |  runs: {df['run'].nunique()}  "
+          f"|  configs: {df['config'].nunique()}  "
+          f"|  matrices: {df['matrix'].nunique()}")
     return df
 
 
+def latest_run(df: pd.DataFrame):
+    """Devuelve (subset, nombre_run) del run más reciente por timestamp."""
+    latest = df.sort_values("timestamp")["run"].iloc[-1]
+    return df[df["run"] == latest].copy(), str(latest)
+
+
 # ---------------------------------------------------------------------------
-# Gráfica 1 — Evolución temporal del speedup LUT vs baseline F32
+# Gráfica 1 — Evolución del speedup entre iteraciones
 # ---------------------------------------------------------------------------
 
 def plot_speedup_evolution(df: pd.DataFrame, out_dir: Path):
-    """
-    Líneas por configuración (W·A·group_size), eje X = label del run.
-    Permite ver si cada mejora (cache LUT, AVX2, Q4_0 nativo...) sube el speedup.
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
+    agg = df.groupby(["run", "config"], observed=True).agg(
+        lut_speedup=("lut_speedup", "mean"),
+        q4_speedup=("q4_speedup", "mean"),
+    ).reset_index()
+
+    if agg["run"].nunique() < 2:
+        fig, ax = plt.subplots(figsize=FIGSIZE_SQR)
+        ax.text(0.5, 0.5,
+                "Se requiere más de un run para graficar evolución temporal.\n"
+                "Corre otra versión del benchmark y re-ejecuta el script.",
+                ha="center", va="center", transform=ax.transAxes,
+                fontsize=11, color="#555555")
+        ax.axis("off")
+        path = out_dir / "01_speedup_evolution.png"
+        fig.savefig(path); plt.close(fig)
+        print(f"  -> {path}")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), sharey=False)
+    palette = sns.color_palette("mako", n_colors=max(agg["config"].nunique(), 3))
 
     for ax, col, title in zip(
-        axes,
-        ["lut_speedup", "q4_speedup"],
-        ["LUT speedup vs F32", "Q4_0 speedup vs F32"]
+        axes, ["lut_speedup", "q4_speedup"],
+        ["Speedup LUT vs F32", "Speedup Q4_0 vs F32"]
     ):
-        pivot = df.groupby(["label", "config"])[col].mean().reset_index()
-        sns.lineplot(
-            data=pivot, x="label", y=col, hue="config",
-            marker="o", ax=ax, linewidth=1.8
-        )
-        ax.axhline(1.0, color="gray", linestyle="--", linewidth=0.9, label="baseline (1×)")
+        sns.lineplot(data=agg, x="run", y=col, hue="config",
+                     marker="o", ax=ax, linewidth=1.6, palette=palette)
+        ax.axhline(1.0, color="#777777", linestyle="--", linewidth=0.9,
+                   label="paridad F32")
         ax.set_title(title)
-        ax.set_xlabel("Run / iteración")
+        ax.set_xlabel("Iteración (run)")
         ax.set_ylabel("Speedup (×)")
-        ax.tick_params(axis="x", rotation=35)
-        ax.legend(title="Config", fontsize=8, title_fontsize=8)
+        ax.tick_params(axis="x", rotation=30)
+        for lbl in ax.get_xticklabels():
+            lbl.set_ha("right")
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()
 
-    fig.suptitle("Evolución del speedup a lo largo de las iteraciones", fontsize=13)
-    fig.tight_layout()
+    handles, labels = axes[-1].get_legend_handles_labels()
+    axes[-1].legend(handles, labels, title="Config",
+                    loc="upper left", bbox_to_anchor=(1.02, 1.0),
+                    borderaxespad=0.0)
+
+    fig.suptitle("Evolución del speedup a lo largo de iteraciones", y=1.02)
     path = out_dir / "01_speedup_evolution.png"
-    fig.savefig(path, dpi=FIGURE_DPI)
+    fig.savefig(path); plt.close(fig)
     print(f"  -> {path}")
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
-# Gráfica 2 — Evolución del error máximo absoluto (LUT vs Q4_0)
+# Gráfica 2 — Evolución del error numérico entre iteraciones
 # ---------------------------------------------------------------------------
 
 def plot_error_evolution(df: pd.DataFrame, out_dir: Path):
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
+    agg = df.groupby(["run", "config"], observed=True).agg(
+        lut_max_err=("lut_max_err", "mean"),
+        q4_max_err=("q4_max_err", "mean"),
+    ).reset_index()
+
+    if agg["run"].nunique() < 2:
+        fig, ax = plt.subplots(figsize=FIGSIZE_SQR)
+        ax.text(0.5, 0.5,
+                "Se requiere más de un run para graficar evolución temporal.",
+                ha="center", va="center", transform=ax.transAxes,
+                fontsize=11, color="#555555")
+        ax.axis("off")
+        path = out_dir / "02_error_evolution.png"
+        fig.savefig(path); plt.close(fig)
+        print(f"  -> {path}")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), sharey=False)
+    palette = sns.color_palette("flare", n_colors=max(agg["config"].nunique(), 3))
 
     for ax, col, title in zip(
-        axes,
-        ["lut_max_err", "q4_max_err"],
-        ["Error máx. absoluto — LUT", "Error máx. absoluto — Q4_0"]
+        axes, ["lut_max_err", "q4_max_err"],
+        ["Error máx. absoluto  —  LUT", "Error máx. absoluto  —  Q4_0"]
     ):
-        pivot = df.groupby(["label", "config"])[col].mean().reset_index()
-        sns.lineplot(
-            data=pivot, x="label", y=col, hue="config",
-            marker="s", ax=ax, linewidth=1.8
-        )
+        sns.lineplot(data=agg, x="run", y=col, hue="config",
+                     marker="s", ax=ax, linewidth=1.6, palette=palette)
         ax.set_title(title)
-        ax.set_xlabel("Run / iteración")
-        ax.set_ylabel("Max abs error")
+        ax.set_xlabel("Iteración (run)")
+        ax.set_ylabel("Max |error|")
         ax.set_yscale("log")
-        ax.tick_params(axis="x", rotation=35)
-        ax.legend(title="Config", fontsize=8, title_fontsize=8)
+        ax.tick_params(axis="x", rotation=30)
+        for lbl in ax.get_xticklabels():
+            lbl.set_ha("right")
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()
 
-    fig.suptitle("Evolución del error numérico (escala log)", fontsize=13)
-    fig.tight_layout()
+    handles, labels = axes[-1].get_legend_handles_labels()
+    axes[-1].legend(handles, labels, title="Config",
+                    loc="upper left", bbox_to_anchor=(1.02, 1.0),
+                    borderaxespad=0.0)
+
+    fig.suptitle("Evolución del error numérico (escala log)", y=1.02)
     path = out_dir / "02_error_evolution.png"
-    fig.savefig(path, dpi=FIGURE_DPI)
+    fig.savefig(path); plt.close(fig)
     print(f"  -> {path}")
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
-# Gráfica 3 — Tradeoff: tamaño de tabla LUT vs error (scatter Pareto)
+# Gráfica 3 — Tamaño de tabla vs error
 # ---------------------------------------------------------------------------
 
 def plot_tradeoff_table_error(df: pd.DataFrame, out_dir: Path):
-    """
-    Eje X = tamaño de la tabla (entradas = 2^(W+A)), eje Y = error máximo LUT.
-    Cada punto es una (config, run), coloreado por la última iteración.
-    """
-    # Usar solo la última iteración para no saturar el plot
-    last_label = df["label"].cat.categories[-1]
-    last = df[df["label"] == last_label].copy()
+    last, run_name = latest_run(df)
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
 
-    for ax, y_col, y_label in zip(
+    for ax, ycol, ylabel in zip(
         axes,
         ["lut_max_err", "lut_mse"],
-        ["Max abs error (LUT)", "MSE (LUT)"]
+        ["Max |error| LUT", "MSE LUT"]
     ):
         sns.scatterplot(
-            data=last, x="lut_table_size", y=y_col,
-            hue="config", size="group_size", sizes=(60, 200),
-            ax=ax, alpha=0.85
+            data=last, x="lut_table_size", y=ycol,
+            hue="config", size="group_size", sizes=(55, 180),
+            ax=ax, alpha=0.9, edgecolor="#333",
         )
         ax.set_xscale("log", base=2)
         ax.set_yscale("log")
-        ax.xaxis.set_major_formatter(mticker.FuncFormatter(
-            lambda x, _: f"$2^{{{int(round(x)).bit_length()-1}}}$\n({int(x)})"
-        ))
-        ax.set_xlabel("Entradas en la tabla LUT  (2^{W+A})")
-        ax.set_ylabel(y_label)
-        ax.set_title(f"Tradeoff: tamaño tabla vs {y_label}")
-        ax.legend(title="Config", fontsize=8, title_fontsize=8)
+        ax.set_xlabel("Entradas LUT ($2^{W+A}$)")
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"Tradeoff tamaño LUT ↔ {ylabel}")
+        ax.xaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda x, _: f"{int(x)}")
+        )
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()
 
-    fig.suptitle(f"Tradeoff tamaño LUT ↔ precisión  [{last_label}]", fontsize=13)
-    fig.tight_layout()
+    handles, labels = axes[-1].get_legend_handles_labels()
+    axes[-1].legend(handles, labels, loc="upper left",
+                    bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0,
+                    fontsize=8, title_fontsize=9)
+
+    fig.suptitle(f"Tamaño de LUT vs precisión  —  run {run_name}", y=1.02)
     path = out_dir / "03_tradeoff_table_error.png"
-    fig.savefig(path, dpi=FIGURE_DPI)
+    fig.savefig(path); plt.close(fig)
     print(f"  -> {path}")
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
-# Gráfica 4 — Tradeoff: tamaño de tabla vs speedup (curva de eficiencia)
+# Gráfica 4 — Tamaño de tabla vs speedup
 # ---------------------------------------------------------------------------
 
 def plot_tradeoff_table_speedup(df: pd.DataFrame, out_dir: Path):
-    last_label = df["label"].cat.categories[-1]
-    last = df[df["label"] == last_label].copy()
+    last, run_name = latest_run(df)
 
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig, ax = plt.subplots(figsize=(10, 5.5))
     sns.scatterplot(
         data=last, x="lut_table_size", y="lut_speedup",
-        hue="config", size="group_size", sizes=(60, 200),
-        ax=ax, alpha=0.85
+        hue="config", size="group_size", sizes=(55, 180),
+        ax=ax, alpha=0.9, edgecolor="#333",
     )
-    ax.axhline(1.0, color="gray", linestyle="--", linewidth=0.9, label="baseline (1×)")
+    ax.axhline(1.0, color="#777777", linestyle="--", linewidth=0.9,
+               label="paridad F32")
     ax.set_xscale("log", base=2)
-    ax.set_xlabel("Entradas en la tabla LUT  (2^{W+A})")
+    ax.set_xlabel("Entradas LUT ($2^{W+A}$)")
     ax.set_ylabel("Speedup LUT vs F32 (×)")
-    ax.set_title(f"Tradeoff: tamaño de tabla LUT ↔ speedup  [{last_label}]")
-    ax.legend(title="Config", fontsize=8, title_fontsize=8)
-    fig.tight_layout()
+    ax.set_title(f"Tamaño de LUT vs speedup  —  run {run_name}")
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{int(x)}"))
+
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles, labels, loc="upper left",
+              bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0,
+              fontsize=8, title_fontsize=9)
+
     path = out_dir / "04_tradeoff_table_speedup.png"
-    fig.savefig(path, dpi=FIGURE_DPI)
+    fig.savefig(path); plt.close(fig)
     print(f"  -> {path}")
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
-# Gráfica 5 — Heatmap: w_bits × a_bits → speedup y error (último run)
+# Gráfica 5 — Heatmaps W × A
 # ---------------------------------------------------------------------------
 
 def plot_heatmaps_wbits_abits(df: pd.DataFrame, out_dir: Path):
-    last_label = df["label"].cat.categories[-1]
-    last = df[df["label"] == last_label].copy()
+    last, run_name = latest_run(df)
 
-    # Agrupar por (w_bits, a_bits) promediando sobre matrices y group_size
     grp = last.groupby(["w_bits", "a_bits"]).agg(
         lut_speedup=("lut_speedup", "mean"),
         lut_max_err=("lut_max_err", "mean"),
@@ -221,128 +324,163 @@ def plot_heatmaps_wbits_abits(df: pd.DataFrame, out_dir: Path):
     ).reset_index()
 
     metrics = [
-        ("lut_speedup", "Speedup LUT (×)", "Blues"),
-        ("lut_max_err", "Max abs error",   "Reds"),
-        ("lut_mse",     "MSE",             "Oranges"),
+        ("lut_speedup", "Speedup LUT (×)",     "crest"),
+        ("lut_max_err", "Error máx. absoluto", "rocket_r"),
+        ("lut_mse",     "MSE",                 "flare"),
     ]
 
-    fig, axes = plt.subplots(1, len(metrics), figsize=(15, 4))
+    fig, axes = plt.subplots(1, len(metrics), figsize=(15, 4.5))
     for ax, (col, title, cmap) in zip(axes, metrics):
         pivot = grp.pivot(index="w_bits", columns="a_bits", values=col)
         sns.heatmap(
             pivot, annot=True, fmt=".3g", cmap=cmap,
-            linewidths=0.5, ax=ax, cbar_kws={"shrink": 0.8}
+            linewidths=0.4, linecolor="white", ax=ax,
+            cbar_kws={"shrink": 0.8, "pad": 0.02},
+            annot_kws={"size": 10},
         )
         ax.set_title(title)
-        ax.set_xlabel("Bits activaciones (a_bits)")
-        ax.set_ylabel("Bits pesos (w_bits)")
+        ax.set_xlabel("Bits activación")
+        ax.set_ylabel("Bits peso")
 
-    fig.suptitle(f"Heatmap W×A bits  [{last_label}]", fontsize=13)
-    fig.tight_layout()
+    fig.suptitle(f"Heatmap W×A bits  —  run {run_name}", y=1.03)
     path = out_dir / "05_heatmap_wbits_abits.png"
-    fig.savefig(path, dpi=FIGURE_DPI)
+    fig.savefig(path); plt.close(fig)
     print(f"  -> {path}")
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
-# Gráfica 6 — Speedup vs group_size para distintos M/N/K (último run)
+# Gráfica 6 — Speedup vs group_size por matriz
 # ---------------------------------------------------------------------------
 
 def plot_speedup_vs_groupsize(df: pd.DataFrame, out_dir: Path):
-    last_label = df["label"].cat.categories[-1]
-    last = df[df["label"] == last_label].copy()
+    last, run_name = latest_run(df)
 
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig, ax = plt.subplots(figsize=(11, 5.5))
     sns.lineplot(
         data=last, x="group_size", y="lut_speedup",
-        hue="matrix", marker="o", ax=ax, linewidth=1.8
+        hue="matrix", marker="o", ax=ax, linewidth=1.8,
+        palette=sns.color_palette("mako",
+                                  n_colors=max(last["matrix"].nunique(), 3)),
     )
-    ax.axhline(1.0, color="gray", linestyle="--", linewidth=0.9)
+    ax.axhline(1.0, color="#777777", linestyle="--", linewidth=0.9)
     ax.set_xlabel("group_size")
     ax.set_ylabel("Speedup LUT vs F32 (×)")
-    ax.set_title(f"Speedup LUT vs group_size por tamaño de matriz  [{last_label}]")
-    ax.legend(title="Matriz (M×N×K)", fontsize=8, title_fontsize=8)
-    fig.tight_layout()
+    ax.set_title(f"Speedup LUT según tamaño de grupo  —  run {run_name}")
+    ax.set_xscale("log", base=2)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{int(x)}"))
+
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles, labels, title="Matriz (M·N·K)",
+              loc="upper left", bbox_to_anchor=(1.02, 1.0),
+              borderaxespad=0.0, fontsize=8, title_fontsize=9)
+
     path = out_dir / "06_speedup_vs_groupsize.png"
-    fig.savefig(path, dpi=FIGURE_DPI)
+    fig.savefig(path); plt.close(fig)
     print(f"  -> {path}")
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
-# Gráfica 7 — Comparativa F32 / Q4_0 / LUT en barras (último run, por matriz)
+# Gráfica 7 — Barras F32 / Q4_0 / LUT por matriz
 # ---------------------------------------------------------------------------
 
 def plot_bar_f32_q4_lut(df: pd.DataFrame, out_dir: Path):
-    last_label = df["label"].cat.categories[-1]
-    last = df[df["label"] == last_label].copy()
+    last, run_name = latest_run(df)
 
-    # Solo la config W4A8 g32 como representativa (si existe)
-    rep = last[(last["w_bits"] == 4) & (last["a_bits"] == 8) & (last["group_size"] == 32)]
+    rep = last[
+        (last["w_bits"] == 4) & (last["a_bits"] == 8) & (last["group_size"] == 32)
+    ].copy()
     if rep.empty:
-        rep = last  # fallback: todo el último run
+        rep = last.copy()
 
-    melt = rep[["matrix", "f32_ms", "q4_ms", "lut_ms"]].melt(
-        id_vars="matrix", var_name="kernel", value_name="ms"
+    rep = rep.drop_duplicates(subset="matrix", keep="first")
+
+    rep = rep.assign(
+        mat_label=lambda d: d.apply(
+            lambda r: f"M={r['M']}\nN={r['N']}\nK={r['K']}", axis=1)
+    ).sort_values(["K", "N", "M"])
+
+    melt = rep[["mat_label", "f32_ms", "q4_ms", "lut_ms"]].melt(
+        id_vars="mat_label", var_name="kernel", value_name="ms"
     )
-    melt["kernel"] = melt["kernel"].map({"f32_ms": "F32", "q4_ms": "Q4_0", "lut_ms": "LUT"})
+    melt["kernel"] = melt["kernel"].map(
+        {"f32_ms": "F32", "q4_ms": "Q4_0", "lut_ms": "LUT"}
+    )
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    sns.barplot(data=melt, x="matrix", y="ms", hue="kernel", ax=ax)
-    ax.set_xlabel("Tamaño de matriz")
-    ax.set_ylabel("Tiempo (ms)")
-    ax.set_title(f"Tiempo de ejecución: F32 vs Q4_0 vs LUT  [{last_label}] — W4A8 g32")
-    ax.tick_params(axis="x", rotation=20)
-    fig.tight_layout()
+    fig, ax = plt.subplots(figsize=(max(10, 1.2 * len(rep)), 6))
+    palette = {"F32": "#3e6fb8", "Q4_0": "#e08a3b", "LUT": "#3f9d4a"}
+    sns.barplot(data=melt, x="mat_label", y="ms", hue="kernel",
+                ax=ax, palette=palette, edgecolor="#222", linewidth=0.4)
+
+    for container in ax.containers:
+        ax.bar_label(container, fmt="%.1f", fontsize=7,
+                     padding=2, color="#333")
+
+    ax.set_xlabel("Dimensión (M, N, K)")
+    ax.set_ylabel("Tiempo (ms, escala log)")
+    ax.set_title(f"F32 vs Q4_0 vs LUT  —  W4A8 g32  —  run {run_name}")
+    ax.set_yscale("log")
+    ax.legend(title="Kernel", loc="upper left",
+              bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0)
+
     path = out_dir / "07_bar_f32_q4_lut.png"
-    fig.savefig(path, dpi=FIGURE_DPI)
+    fig.savefig(path); plt.close(fig)
     print(f"  -> {path}")
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
-# Gráfica 8 — Frente de Pareto error vs speedup (último run)
+# Gráfica 8 — Frente de Pareto speedup ↔ error
 # ---------------------------------------------------------------------------
 
 def plot_pareto_error_speedup(df: pd.DataFrame, out_dir: Path):
-    last_label = df["label"].cat.categories[-1]
-    last = df[df["label"] == last_label].copy()
+    last, run_name = latest_run(df)
 
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig, ax = plt.subplots(figsize=(10, 6))
     scatter = ax.scatter(
         last["lut_speedup"], last["lut_max_err"],
-        c=last["lut_table_size"], cmap="viridis",
-        s=80, alpha=0.85, edgecolors="k", linewidths=0.4
+        c=last["lut_table_size"], cmap="mako",
+        s=70, alpha=0.85, edgecolors="#222", linewidths=0.4,
     )
-    cbar = fig.colorbar(scatter, ax=ax)
-    cbar.set_label("Entradas LUT (2^{W+A})")
-    ax.axvline(1.0, color="gray", linestyle="--", linewidth=0.9)
+    cbar = fig.colorbar(scatter, ax=ax, pad=0.02)
+    cbar.set_label("Entradas LUT ($2^{W+A}$)")
+    ax.axvline(1.0, color="#777777", linestyle="--", linewidth=0.9,
+               label="paridad F32")
     ax.set_xlabel("Speedup LUT vs F32 (×)")
     ax.set_ylabel("Error máx. absoluto LUT")
     ax.set_yscale("log")
-    ax.set_title(f"Frente de Pareto: speedup ↔ error  [{last_label}]")
+    ax.set_title(f"Frente de Pareto  —  run {run_name}")
 
-    # Anotar cada punto con su config
-    for _, row in last.iterrows():
-        ax.annotate(row["config"], (row["lut_speedup"], row["lut_max_err"]),
-                    fontsize=7, xytext=(4, 4), textcoords="offset points", alpha=0.8)
+    # Solo anotar los puntos de interés para no saturar
+    top_speed = last.nlargest(3, "lut_speedup")
+    low_err   = last.nsmallest(3, "lut_max_err")
+    to_annotate = pd.concat([top_speed, low_err]).drop_duplicates(
+        subset=["matrix", "config"]
+    )
 
-    fig.tight_layout()
+    for _, row in to_annotate.iterrows():
+        label = f"{row['matrix']}\n{row['config']}"
+        ax.annotate(
+            label,
+            (row["lut_speedup"], row["lut_max_err"]),
+            xytext=(6, 6), textcoords="offset points",
+            fontsize=7, color="#222",
+            bbox=dict(boxstyle="round,pad=0.2",
+                      facecolor="white", edgecolor="#cccccc", alpha=0.85),
+        )
+
+    ax.legend(loc="upper left", bbox_to_anchor=(1.18, 1.0))
     path = out_dir / "08_pareto_error_speedup.png"
-    fig.savefig(path, dpi=FIGURE_DPI)
+    fig.savefig(path); plt.close(fig)
     print(f"  -> {path}")
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
-# Resumen estadístico en consola
+# Resumen en consola
 # ---------------------------------------------------------------------------
 
 def print_summary(df: pd.DataFrame):
     print("\n=== Resumen por run ===")
-    summary = df.groupby("label").agg(
-        runs=("M", "count"),
+    summary = df.groupby("run", observed=True).agg(
+        filas=("M", "count"),
         lut_speedup_mean=("lut_speedup", "mean"),
         lut_speedup_max=("lut_speedup", "max"),
         lut_max_err_mean=("lut_max_err", "mean"),
@@ -357,13 +495,15 @@ def print_summary(df: pd.DataFrame):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualización de benchmarks LUT-GEMM")
+    parser = argparse.ArgumentParser(description="Visualización LUT-GEMM.")
     parser.add_argument("--csv",  default="bench_log.csv",
-                        help="Ruta al CSV de historial (default: bench_log.csv)")
+                        help="Ruta al CSV (default: bench_log.csv)")
     parser.add_argument("--out",  default="graficas",
-                        help="Directorio de salida para las gráficas (default: graficas/)")
+                        help="Directorio de salida (default: graficas/)")
+    parser.add_argument("--run",  default=None,
+                        help="Filtrar a un run específico por nombre")
     parser.add_argument("--show", action="store_true",
-                        help="Mostrar cada gráfica en pantalla además de guardarla")
+                        help="Mostrar las gráficas además de guardarlas")
     args = parser.parse_args()
 
     csv_path = Path(args.csv)
@@ -376,10 +516,17 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df = load_data(str(csv_path))
+
+    if args.run:
+        df = df[df["run"] == args.run].copy()
+        if df.empty:
+            print(f"[ERROR] No hay filas para run='{args.run}'", file=sys.stderr)
+            sys.exit(1)
+        print(f"[OK] Filtrado a run='{args.run}': {len(df)} filas")
+
     print_summary(df)
 
     print(f"\nGenerando gráficas en: {out_dir}\n")
-
     plots = [
         plot_speedup_evolution,
         plot_error_evolution,
