@@ -21,8 +21,8 @@ DESCRIPTION="${1:-unnamed}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# Auto-incremento del número de versión
-N=$(( $(ls -d "$SCRIPT_DIR"/test_v* 2>/dev/null | wc -l) + 1 ))
+# Auto-incremento del número de versión (robusto a directorios inexistentes)
+N=$(( $(find "$SCRIPT_DIR" -maxdepth 1 -type d -name 'test_v*' 2>/dev/null | wc -l) + 1 ))
 VERSION_DIR="$SCRIPT_DIR/test_v${N}_${DESCRIPTION}"
 
 if [ -d "$VERSION_DIR" ]; then
