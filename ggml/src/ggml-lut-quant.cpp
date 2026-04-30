@@ -164,6 +164,10 @@ void ggml_lut_quantize_weights_q4_0(
     qd.scales     = new float[num_groups];
     qd.num_groups = num_groups;
 
+    // Layout interleaved de Q4_0:
+    //   byte i  →  nibble bajo = elemento i
+    //              nibble alto = elemento i + QK4_0/2  (i + 16)
+    // (ver quantize_row_q4_0_ref / dequantize_row_q4_0 en ggml-quants.c)
     for (int n = 0; n < N; ++n) {
         for (int b = 0; b < blocks_per_row; ++b) {
             const block_q4_0 & blk = q4_blocks[(size_t) n * blocks_per_row + b];
@@ -173,10 +177,10 @@ void ggml_lut_quantize_weights_q4_0(
             const int base_k = b * QK4_0;
             for (int i = 0; i < QK4_0 / 2; ++i) {
                 const uint8_t byte  = blk.qs[i];
-                const uint8_t lo    = byte & 0x0F;   // índice [0,15]
-                const uint8_t hi    = byte >> 4;      // índice [0,15]
-                qd.w_q[(size_t) n * K + base_k + 2 * i    ] = lo;
-                qd.w_q[(size_t) n * K + base_k + 2 * i + 1] = hi;
+                const uint8_t lo    = byte & 0x0F;
+                const uint8_t hi    = byte >> 4;
+                qd.w_q[(size_t) n * K + base_k + i              ] = lo;  // elemento i
+                qd.w_q[(size_t) n * K + base_k + i + QK4_0 / 2  ] = hi;  // elemento i+16
             }
         }
     }
