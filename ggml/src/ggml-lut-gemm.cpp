@@ -1,5 +1,7 @@
 #include "ggml-lut.h"
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -147,6 +149,8 @@ static void lut_gemm_kernel(
 ) {
     const int a_levels = 1 << a_bits;
 
+    const bool debug = (getenv("LUT_DEBUG") != nullptr);
+
     for (int m = 0; m < M; ++m) {
         for (int n = 0; n < N; ++n) {
             float acc_float = 0.0f;
@@ -199,7 +203,24 @@ static void lut_gemm_kernel(
                 }
 #endif
 
+                if (debug && m == 0 && n == 0) {
+                    fprintf(stderr,
+                        "[LUT-DEBUG] m=0 n=0 b=%d: acc_int=%lld  "
+                        "scale_w_b=%.6e  scale_a_b=%.6e  "
+                        "block_contrib=%.6f\n",
+                        b, (long long) acc_int,
+                        (double) scale_w_b, (double) scale_a_b,
+                        (double) ((float) acc_int * scale_w_b * scale_a_b));
+                }
+
                 acc_float += (float) acc_int * scale_w_b * scale_a_b;
+            }
+
+            if (debug && m == 0 && n == 0) {
+                fprintf(stderr,
+                    "[LUT-DEBUG] m=0 n=0 final out=%.6f  "
+                    "(esperado F32=-9.4563)\n",
+                    (double) acc_float);
             }
 
             out[m * N + n] = acc_float;
