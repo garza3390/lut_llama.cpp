@@ -162,9 +162,10 @@ static void lut_gemm_kernel(
                 const float scale_a_b = scales_a[(size_t) m * blocks_per_row + b];
 
                 int64_t acc_int = 0;
+                const bool force_scalar = debug && m == 0 && n == 0;
 
 #if defined(__AVX2__)
-                {
+                if (!force_scalar) {
                     __m256i acc_v = _mm256_setzero_si256();
                     const __m256i a_lev_v = _mm256_set1_epi32(a_levels);
                     int k = k_start;
@@ -193,6 +194,25 @@ static void lut_gemm_kernel(
                         const uint8_t w_idx = w_q[(size_t) n * K + k];
                         const uint8_t a_idx = a_q[(size_t) m * K + k];
                         acc_int += (int64_t) lut2d[(int) w_idx * a_levels + (int) a_idx];
+                    }
+                } else {
+                    // Camino escalar para diagnóstico (mismo cómputo que el fallback)
+                    fprintf(stderr,
+                        "[LUT-DEBUG]   bloque b=%d, k_start=%d k_end=%d:\n",
+                        b, k_start, k_end);
+                    for (int k = k_start; k < k_end; ++k) {
+                        const uint8_t w_idx = w_q[(size_t) n * K + k];
+                        const uint8_t a_idx = a_q[(size_t) m * K + k];
+                        const int32_t lut_val = lut2d[(int) w_idx * a_levels + (int) a_idx];
+                        acc_int += (int64_t) lut_val;
+                        if (k < k_start + 8) {
+                            fprintf(stderr,
+                                "      k=%2d  w_idx=%3u a_idx=%3u  q_w=%4d q_a=%5d  "
+                                "lut=%6d\n",
+                                k, (unsigned) w_idx, (unsigned) a_idx,
+                                (int) w_idx - 8, (int) a_idx - 128,
+                                (int) lut_val);
+                        }
                     }
                 }
 #else
