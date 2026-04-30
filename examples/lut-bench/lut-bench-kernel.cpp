@@ -29,12 +29,16 @@ struct BenchResult {
     int lut_table_bytes;        // lut_table_size * sizeof(int32_t)
     double f32_ms;
     double q4_ms;
+    double q8_ms;
     double lut_ms;
     double q4_speedup;
+    double q8_speedup;
     double lut_speedup;
     float  q4_max_err;
+    float  q8_max_err;
     float  lut_max_err;
     float  q4_mse;
+    float  q8_mse;
     float  lut_mse;
     bool   fits_l1_cache;       // table_bytes <= 32 KB
     bool   fits_single_bram36;  // table_bytes <= 32 KB
@@ -73,6 +77,21 @@ static double benchmark_gemm_q4_0(
     for (int it = 0; it < iterations; ++it) {
         struct ggml_cgraph * gf = ggml_new_graph(ctx);
         struct ggml_tensor * C  = ggml_mul_mat(ctx, B_q4, A);
+        ggml_build_forward_expand(gf, C);
+        ggml_backend_graph_compute(backend, gf);
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    return std::chrono::duration<double, std::milli>(t1 - t0).count() / iterations;
+}
+
+static double benchmark_gemm_q8_0(
+    ggml_backend_t backend, struct ggml_context * ctx,
+    struct ggml_tensor * A, struct ggml_tensor * B_q8, int iterations
+) {
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (int it = 0; it < iterations; ++it) {
+        struct ggml_cgraph * gf = ggml_new_graph(ctx);
+        struct ggml_tensor * C  = ggml_mul_mat(ctx, B_q8, A);
         ggml_build_forward_expand(gf, C);
         ggml_backend_graph_compute(backend, gf);
     }
@@ -127,10 +146,10 @@ static std::string get_timestamp() {
 static const char * CSV_HEADER =
     "timestamp,label,"
     "M,N,K,w_bits,a_bits,group_size,lut_table_size,lut_table_bytes,"
-    "f32_ms,q4_ms,lut_ms,"
-    "q4_speedup,lut_speedup,"
-    "q4_max_err,lut_max_err,"
-    "q4_mse,lut_mse,"
+    "f32_ms,q4_ms,q8_ms,lut_ms,"
+    "q4_speedup,q8_speedup,lut_speedup,"
+    "q4_max_err,q8_max_err,lut_max_err,"
+    "q4_mse,q8_mse,lut_mse,"
     "fits_l1_cache,fits_single_bram36\n";
 
 static void save_results(
@@ -160,10 +179,10 @@ static void save_results(
           << r.M << "," << r.N << "," << r.K << ","
           << r.w_bits << "," << r.a_bits << "," << r.group_size << ","
           << r.lut_table_size << "," << r.lut_table_bytes << ","
-          << r.f32_ms << "," << r.q4_ms << "," << r.lut_ms << ","
-          << r.q4_speedup << "," << r.lut_speedup << ","
-          << r.q4_max_err << "," << r.lut_max_err << ","
-          << r.q4_mse << "," << r.lut_mse << ","
+          << r.f32_ms << "," << r.q4_ms << "," << r.q8_ms << "," << r.lut_ms << ","
+          << r.q4_speedup << "," << r.q8_speedup << "," << r.lut_speedup << ","
+          << r.q4_max_err << "," << r.q8_max_err << "," << r.lut_max_err << ","
+          << r.q4_mse << "," << r.q8_mse << "," << r.lut_mse << ","
           << (r.fits_l1_cache ? 1 : 0) << ","
           << (r.fits_single_bram36 ? 1 : 0) << "\n";
     }
@@ -199,7 +218,7 @@ int main(int argc, char ** argv) {
     printf("Data dir : %s\n", data_dir.c_str());
     printf("Timestamp: %s\n", timestamp.c_str());
     printf("Iters    : %d\n", iterations);
-    printf("Comparacion: F32 | Q4_0 nativo ggml | LUT-Q4_0\n");
+    printf("Comparacion: F32 | Q4_0 ggml | Q8_0 ggml | LUT-Q4_0\n");
     printf("=============================================================\n\n");
 
     ggml_lut_global_init();
@@ -223,8 +242,8 @@ int main(int argc, char ** argv) {
     };
 
     printf("op_type,m,n,k,w_bits,a_bits,group_size,lut_table_size,"
-           "f32_ms,q4_ms,lut_ms,q4_speedup,lut_speedup,"
-           "q4_max_err,lut_max_err,q4_mse,lut_mse\n");
+           "f32_ms,q4_ms,q8_ms,lut_ms,q4_speedup,q8_speedup,lut_speedup,"
+           "q4_max_err,q8_max_err,lut_max_err,q4_mse,q8_mse,lut_mse\n");
 
     std::vector<BenchResult> all_results;
 
@@ -288,7 +307,21 @@ int main(int argc, char ** argv) {
         struct ggml_tensor * C_q4 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.N, cfg.M);
         std::memcpy(C_q4->data, C_q4_t->data, ggml_nbytes(C_q4));
 
-        // 3) LUT-Q4_0
+        // 3) Q8_0 nativo ggml
+        struct ggml_tensor * B_q8 = ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_0, cfg.K, cfg.N);
+        quantize_q8_0((const float *) B->data, B_q8->data, cfg.N, cfg.K, NULL);
+
+        double q8_ms = benchmark_gemm_q8_0(backend, ctx, A, B_q8, iterations);
+
+        struct ggml_cgraph * gf_q8 = ggml_new_graph(ctx);
+        struct ggml_tensor * C_q8_t = ggml_mul_mat(ctx, B_q8, A);
+        ggml_build_forward_expand(gf_q8, C_q8_t);
+        ggml_backend_graph_compute(backend, gf_q8);
+
+        struct ggml_tensor * C_q8 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cfg.N, cfg.M);
+        std::memcpy(C_q8->data, C_q8_t->data, ggml_nbytes(C_q8));
+
+        // 4) LUT-Q4_0
         ggml_lut_quantize_weights_q4_0(B, &lut_cfg);
         double lut_ms = benchmark_gemm_lut(A, B, C_lut, &lut_cfg, iterations);
 
@@ -296,6 +329,7 @@ int main(int argc, char ** argv) {
         const size_t out_elems = (size_t) cfg.M * cfg.N;
         const float * ref_ptr = (const float *) C_ref->data;
         const float * q4_ptr  = (const float *) C_q4->data;
+        const float * q8_ptr  = (const float *) C_q8->data;
         const float * lut_ptr = (const float *) C_lut->data;
 
         BenchResult r;
@@ -307,21 +341,25 @@ int main(int argc, char ** argv) {
         r.fits_single_bram36 = r.lut_table_bytes <= 32 * 1024;
         r.f32_ms     = f32_ms;
         r.q4_ms      = q4_ms;
+        r.q8_ms      = q8_ms;
         r.lut_ms     = lut_ms;
         r.q4_speedup  = (q4_ms  > 0.0) ? f32_ms / q4_ms  : 0.0;
+        r.q8_speedup  = (q8_ms  > 0.0) ? f32_ms / q8_ms  : 0.0;
         r.lut_speedup = (lut_ms > 0.0) ? f32_ms / lut_ms : 0.0;
         r.q4_max_err  = compute_max_error(ref_ptr, q4_ptr,  out_elems);
+        r.q8_max_err  = compute_max_error(ref_ptr, q8_ptr,  out_elems);
         r.lut_max_err = compute_max_error(ref_ptr, lut_ptr, out_elems);
         r.q4_mse      = compute_mse(ref_ptr, q4_ptr,  out_elems);
+        r.q8_mse      = compute_mse(ref_ptr, q8_ptr,  out_elems);
         r.lut_mse     = compute_mse(ref_ptr, lut_ptr, out_elems);
 
         printf("GEMM,%d,%d,%d,%d,%d,%d,%d,"
-               "%.4f,%.4f,%.4f,%.4f,%.4f,%.6e,%.6e,%.6e,%.6e\n",
+               "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n",
                r.M, r.N, r.K, r.w_bits, r.a_bits, r.group_size, r.lut_table_size,
-               r.f32_ms, r.q4_ms, r.lut_ms,
-               r.q4_speedup, r.lut_speedup,
-               r.q4_max_err, r.lut_max_err,
-               r.q4_mse, r.lut_mse);
+               r.f32_ms, r.q4_ms, r.q8_ms, r.lut_ms,
+               r.q4_speedup, r.q8_speedup, r.lut_speedup,
+               r.q4_max_err, r.q8_max_err, r.lut_max_err,
+               r.q4_mse, r.q8_mse, r.lut_mse);
 
         all_results.push_back(r);
 

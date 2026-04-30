@@ -63,12 +63,16 @@ struct BenchResult {
     int lut_table_bytes;        // lut_table_size * sizeof(int32_t)
     double f32_ms;
     double q4_ms;
+    double q8_ms;
     double lut_ms;
     double q4_speedup;
+    double q8_speedup;
     double lut_speedup;
     float  q4_max_err;
+    float  q8_max_err;
     float  lut_max_err;
     float  q4_mse;
+    float  q8_mse;
     float  lut_mse;
     // Flags para análisis HLS
     bool   fits_l1_cache;       // table_bytes <= 32 KB
@@ -153,6 +157,23 @@ static double time_q4(ggml_backend_t bk, struct ggml_context * ctx,
     for (int i = 0; i < iters; ++i) {
         auto * gf = ggml_new_graph(ctx);
         ggml_build_forward_expand(gf, ggml_mul_mat(ctx, Bq4, A));
+        ggml_backend_graph_compute(bk, gf);
+    }
+    return std::chrono::duration<double,std::milli>(
+        std::chrono::high_resolution_clock::now() - t0).count() / iters;
+}
+
+static double time_q8(ggml_backend_t bk, struct ggml_context * ctx,
+                       struct ggml_tensor * A, struct ggml_tensor * Bq8,
+                       int iters) {
+    { auto * gf = ggml_new_graph(ctx);
+      ggml_build_forward_expand(gf, ggml_mul_mat(ctx, Bq8, A));
+      ggml_backend_graph_compute(bk, gf); }
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iters; ++i) {
+        auto * gf = ggml_new_graph(ctx);
+        ggml_build_forward_expand(gf, ggml_mul_mat(ctx, Bq8, A));
         ggml_backend_graph_compute(bk, gf);
     }
     return std::chrono::duration<double,std::milli>(
@@ -247,6 +268,23 @@ static BenchResult run_one(
                        (size_t)mat.M * mat.N);
       }
 
+      // ── Q8_0 nativo ────────────────────────────────────────────────
+      auto * Bq8 = ggml_new_tensor_2d(ctx, GGML_TYPE_Q8_0, mat.K, mat.N);
+      quantize_q8_0((const float*)B->data, Bq8->data, mat.N, mat.K, NULL);
+      r.q8_ms = time_q8(bk, ctx, A, Bq8, iters);
+
+      { auto * gfq = ggml_new_graph(ctx);
+        auto * Cq  = ggml_mul_mat(ctx, Bq8, A);
+        ggml_build_forward_expand(gfq, Cq);
+        ggml_backend_graph_compute(bk, gfq);
+        auto * C_q8 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, mat.N, mat.M);
+        std::memcpy(C_q8->data, Cq->data, ggml_nbytes(C_q8));
+        r.q8_max_err = max_abs_error((float*)C_ref->data, (float*)C_q8->data,
+                                     (size_t)mat.M * mat.N);
+        r.q8_mse = mse((float*)C_ref->data, (float*)C_q8->data,
+                       (size_t)mat.M * mat.N);
+      }
+
       // ── LUT-Q4_0 ───────────────────────────────────────────────────
       ggml_lut_config lut_cfg{ qcfg.w_bits, qcfg.a_bits, qcfg.group_size, 1, true };
       ggml_lut_clear_weights();              // evitar aliasing con run anterior
@@ -260,6 +298,7 @@ static BenchResult run_one(
     }
 
     r.q4_speedup  = (r.q4_ms  > 0.0) ? r.f32_ms / r.q4_ms  : 0.0;
+    r.q8_speedup  = (r.q8_ms  > 0.0) ? r.f32_ms / r.q8_ms  : 0.0;
     r.lut_speedup = (r.lut_ms > 0.0) ? r.f32_ms / r.lut_ms : 0.0;
 
     ggml_backend_free(bk);
@@ -274,10 +313,10 @@ static BenchResult run_one(
 static const char * CSV_HEADER =
     "timestamp,label,"
     "M,N,K,w_bits,a_bits,group_size,lut_table_size,lut_table_bytes,"
-    "f32_ms,q4_ms,lut_ms,"
-    "q4_speedup,lut_speedup,"
-    "q4_max_err,lut_max_err,"
-    "q4_mse,lut_mse,"
+    "f32_ms,q4_ms,q8_ms,lut_ms,"
+    "q4_speedup,q8_speedup,lut_speedup,"
+    "q4_max_err,q8_max_err,lut_max_err,"
+    "q4_mse,q8_mse,lut_mse,"
     "fits_l1_cache,fits_single_bram36\n";
 
 static void append_csv(const std::string & path, const std::vector<BenchResult> & rows) {
@@ -291,10 +330,10 @@ static void append_csv(const std::string & path, const std::vector<BenchResult> 
           << r.M << "," << r.N << "," << r.K << ","
           << r.w_bits << "," << r.a_bits << "," << r.group_size << ","
           << r.lut_table_size << "," << r.lut_table_bytes << ","
-          << r.f32_ms << "," << r.q4_ms << "," << r.lut_ms << ","
-          << r.q4_speedup << "," << r.lut_speedup << ","
-          << r.q4_max_err << "," << r.lut_max_err << ","
-          << r.q4_mse << "," << r.lut_mse << ","
+          << r.f32_ms << "," << r.q4_ms << "," << r.q8_ms << "," << r.lut_ms << ","
+          << r.q4_speedup << "," << r.q8_speedup << "," << r.lut_speedup << ","
+          << r.q4_max_err << "," << r.q8_max_err << "," << r.lut_max_err << ","
+          << r.q4_mse << "," << r.q8_mse << "," << r.lut_mse << ","
           << (r.fits_l1_cache ? 1 : 0) << ","
           << (r.fits_single_bram36 ? 1 : 0) << "\n";
     }
@@ -307,11 +346,14 @@ static void append_csv(const std::string & path, const std::vector<BenchResult> 
 static void print_result(const BenchResult & r) {
     if (r.lut_ms < 0) { printf("  [SKIP] K no múltiplo de group_size/QK4_0\n"); return; }
     printf("  M=%-4d N=%-5d K=%-5d W%dA%d g%-3d | "
-           "F32=%6.2fms  Q4=%6.2fms(%.2fx)  LUT=%6.2fms(%.2fx) | "
-           "err_q4=%.2e err_lut=%.2e | table=%dB L1=%s BRAM=%s\n",
+           "F32=%6.2f  Q4=%6.2f(%.2fx)  Q8=%6.2f(%.2fx)  LUT=%6.2f(%.2fx) | "
+           "err_q4=%.2e q8=%.2e lut=%.2e | table=%dB L1=%s BRAM=%s\n",
            r.M, r.N, r.K, r.w_bits, r.a_bits, r.group_size,
-           r.f32_ms, r.q4_ms, r.q4_speedup, r.lut_ms, r.lut_speedup,
-           r.q4_max_err, r.lut_max_err,
+           r.f32_ms,
+           r.q4_ms,  r.q4_speedup,
+           r.q8_ms,  r.q8_speedup,
+           r.lut_ms, r.lut_speedup,
+           r.q4_max_err, r.q8_max_err, r.lut_max_err,
            r.lut_table_bytes,
            r.fits_l1_cache ? "SI" : "no",
            r.fits_single_bram36 ? "SI" : "no");

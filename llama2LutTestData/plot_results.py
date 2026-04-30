@@ -399,15 +399,19 @@ def plot_bar_f32_q4_lut(df: pd.DataFrame, out_dir: Path):
             lambda r: f"M={r['M']}\nN={r['N']}\nK={r['K']}", axis=1)
     ).sort_values(["K", "N", "M"])
 
-    melt = rep[["mat_label", "f32_ms", "q4_ms", "lut_ms"]].melt(
+    cols_avail = ["mat_label", "f32_ms", "q4_ms", "lut_ms"]
+    if "q8_ms" in rep.columns:
+        cols_avail.insert(3, "q8_ms")
+    melt = rep[cols_avail].melt(
         id_vars="mat_label", var_name="kernel", value_name="ms"
     )
-    melt["kernel"] = melt["kernel"].map(
-        {"f32_ms": "F32", "q4_ms": "Q4_0", "lut_ms": "LUT"}
-    )
+    kernel_names = {"f32_ms": "F32", "q4_ms": "Q4_0",
+                    "q8_ms": "Q8_0", "lut_ms": "LUT"}
+    melt["kernel"] = melt["kernel"].map(kernel_names)
 
     fig, ax = plt.subplots(figsize=(max(10, 1.2 * len(rep)), 6))
-    palette = {"F32": "#3e6fb8", "Q4_0": "#e08a3b", "LUT": "#3f9d4a"}
+    palette = {"F32": "#3e6fb8", "Q4_0": "#e08a3b",
+               "Q8_0": "#b86b3a", "LUT": "#3f9d4a"}
     sns.barplot(data=melt, x="mat_label", y="ms", hue="kernel",
                 ax=ax, palette=palette, edgecolor="#222", linewidth=0.4)
 
@@ -479,13 +483,16 @@ def plot_pareto_error_speedup(df: pd.DataFrame, out_dir: Path):
 
 def print_summary(df: pd.DataFrame):
     print("\n=== Resumen por run ===")
-    summary = df.groupby("run", observed=True).agg(
-        filas=("M", "count"),
-        lut_speedup_mean=("lut_speedup", "mean"),
-        lut_speedup_max=("lut_speedup", "max"),
-        lut_max_err_mean=("lut_max_err", "mean"),
-        q4_speedup_mean=("q4_speedup", "mean"),
-    ).round(4)
+    aggs = {
+        "filas":            ("M", "count"),
+        "lut_speedup_mean": ("lut_speedup", "mean"),
+        "lut_speedup_max":  ("lut_speedup", "max"),
+        "lut_max_err_mean": ("lut_max_err", "mean"),
+        "q4_speedup_mean":  ("q4_speedup", "mean"),
+    }
+    if "q8_speedup" in df.columns:
+        aggs["q8_speedup_mean"] = ("q8_speedup", "mean")
+    summary = df.groupby("run", observed=True).agg(**aggs).round(4)
     print(summary.to_string())
     print()
 

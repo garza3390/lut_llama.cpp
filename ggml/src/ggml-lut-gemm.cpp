@@ -79,7 +79,7 @@ static void ggml_lut_quantize_activations(
 
             float absmax = 0.0f;
             for (int k = k_start; k < k_end; ++k) {
-                float v  = a_data[(size_t) k * M + m];
+                float v  = a_data[(size_t) m * K + k];
                 float av = v >= 0.0f ? v : -v;
                 if (av > absmax) { absmax = av; }
             }
@@ -88,13 +88,13 @@ static void ggml_lut_quantize_activations(
             scales_a[(size_t) m * blocks_per_row_a + b] = scale_a;
 
             for (int k = k_start; k < k_end; ++k) {
-                float v = a_data[(size_t) k * M + m] / scale_a;
+                float v = a_data[(size_t) m * K + k] / scale_a;
                 int   q_centered = (int) (v >= 0.0f ? v + 0.5f : v - 0.5f);
 
                 if (q_centered < -q_neg_max) { q_centered = -q_neg_max; }
                 else if (q_centered >  q_pos_max) { q_centered =  q_pos_max; }
 
-                a_q[(size_t) k * M + m] = (uint8_t) (q_centered + q_neg_max);
+                a_q[(size_t) m * K + k] = (uint8_t) (q_centered + q_neg_max);
             }
         }
     }
@@ -169,7 +169,7 @@ static void lut_gemm_kernel(
                         const __m128i w_byte = _mm_loadl_epi64(
                             (const __m128i *) (w_q + (size_t) n * K + k));
                         const __m128i a_byte = _mm_loadl_epi64(
-                            (const __m128i *) (a_q + (size_t) k * M + m));
+                            (const __m128i *) (a_q + (size_t) m * K + k));
 
                         const __m256i w_i32 = _mm256_cvtepu8_epi32(w_byte);
                         const __m256i a_i32 = _mm256_cvtepu8_epi32(a_byte);
@@ -187,14 +187,14 @@ static void lut_gemm_kernel(
 
                     for (; k < k_end; ++k) {
                         const uint8_t w_idx = w_q[(size_t) n * K + k];
-                        const uint8_t a_idx = a_q[(size_t) k * M + m];
+                        const uint8_t a_idx = a_q[(size_t) m * K + k];
                         acc_int += (int64_t) lut2d[(int) w_idx * a_levels + (int) a_idx];
                     }
                 }
 #else
                 for (int k = k_start; k < k_end; ++k) {
                     const uint8_t w_idx = w_q[(size_t) n * K + k];
-                    const uint8_t a_idx = a_q[(size_t) k * M + m];
+                    const uint8_t a_idx = a_q[(size_t) m * K + k];
                     acc_int += (int64_t) lut2d[(int) w_idx * a_levels + (int) a_idx];
                 }
 #endif
