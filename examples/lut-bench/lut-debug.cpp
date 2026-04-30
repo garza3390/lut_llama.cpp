@@ -31,11 +31,11 @@
 
 // Datos deterministas para reproducibilidad.
 static float det_a(int k, int m) {
-    return std::sinf(0.13f * (float) k + 0.27f * (float) m);
+    return std::sin(0.13f * (float) k + 0.27f * (float) m);
 }
 
 static float det_b(int k, int n) {
-    return std::cosf(0.21f * (float) k + 0.41f * (float) n);
+    return std::cos(0.21f * (float) k + 0.41f * (float) n);
 }
 
 // F32 manual fuera de ggml: out[n,m] = sum_k B[k,n] * A[k,m]
