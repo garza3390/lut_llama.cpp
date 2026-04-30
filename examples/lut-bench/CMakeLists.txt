@@ -13,3 +13,11 @@ target_include_directories(lut-bench-suite PRIVATE
     ${CMAKE_SOURCE_DIR}/ggml/include
     ${CMAKE_SOURCE_DIR}/ggml/src
 )
+
+add_executable(lut-debug lut-debug.cpp)
+target_compile_features(lut-debug PRIVATE cxx_std_17)
+target_link_libraries(lut-debug PRIVATE ggml ggml-lut)
+target_include_directories(lut-debug PRIVATE
+    ${CMAKE_SOURCE_DIR}/ggml/include
+    ${CMAKE_SOURCE_DIR}/ggml/src
+)
