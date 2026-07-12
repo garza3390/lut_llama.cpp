@@ -483,6 +483,7 @@ if (GGML_LUT)
         src/ggml-lut.cpp
         src/ggml-lut-quant.cpp
         src/ggml-lut-gemm.cpp
+        src/ggml-lut-silu.cpp
     )
     
     target_include_directories(ggml-lut PUBLIC
@@ -493,12 +494,21 @@ if (GGML_LUT)
     )
     
     target_link_libraries(ggml-lut PUBLIC ggml-base)
-    
+
+    # OpenMP para paralelización del kernel sobre la matriz de salida
+    find_package(OpenMP)
+    if (OpenMP_CXX_FOUND)
+        target_link_libraries(ggml-lut PUBLIC OpenMP::OpenMP_CXX)
+        message(STATUS "GGML LUT: OpenMP enabled (${OpenMP_CXX_VERSION})")
+    else()
+        message(STATUS "GGML LUT: OpenMP no disponible, kernel single-threaded")
+    endif()
+
     set_target_properties(ggml-lut PROPERTIES
         POSITION_INDEPENDENT_CODE ON
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )
-    
+
     message(STATUS "GGML LUT: enabled")
 endif()

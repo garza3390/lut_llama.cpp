@@ -240,4 +240,8 @@ if (GGML_LUT)
     add_executable(test-lut-ffn-layer test-lut-ffn-layer.cpp)
     target_link_libraries(test-lut-ffn-layer PRIVATE ggml ggml-lut)
     add_test(NAME test-lut-ffn-layer COMMAND test-lut-ffn-layer)
+
+    add_executable(test-lut-silu-api test-lut-silu-api.cpp)
+    target_link_libraries(test-lut-silu-api PRIVATE ggml ggml-lut)
+    add_test(NAME test-lut-silu-api COMMAND test-lut-silu-api)
 endif()

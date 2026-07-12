@@ -105,6 +105,38 @@ GGML_API const int32_t * ggml_lut_get_or_build_table(int w_bits, int a_bits);
  */
 GGML_API void ggml_lut_clear_weights(void);
 
+/* -----------------------------------------------------------------------------
+ * SiLU activation via LUT (covers OE4 — extensión a funciones no lineales)
+ * ---------------------------------------------------------------------------*/
+
+/**
+ * Apply LUT-based SiLU element-wise:  out[i] = silu(in[i]) = in[i] * sigmoid(in[i]).
+ *
+ * Implementación:
+ *   - Tabla precomputada de 2^bits entradas que mapea idx → silu(x_idx),
+ *     donde x_idx recorre uniformemente [-x_range, +x_range].
+ *   - Para cada elemento se aplica saturación contra [-x_range, +x_range],
+ *     se mapea al índice más cercano y se interpola linealmente entre
+ *     entradas adyacentes.
+ *   - La tabla se cachea por la pareja (bits, x_range) y se reutiliza en
+ *     llamadas sucesivas.
+ *
+ * Tensores:
+ *   - in y out son F32 contiguos con misma cantidad de elementos.
+ *   - Forma arbitraria (vector, matriz, batch); se opera elemento por elemento.
+ *
+ * Parámetros:
+ *   - bits     : 8 o 16 típicamente. Más bits, mejor precisión, mayor tabla.
+ *   - x_range  : rango de saturación. 8.0 cubre activaciones típicas tras
+ *                normalización; puede ajustarse según el modelo.
+ */
+GGML_API void ggml_lut_silu_apply(
+    const struct ggml_tensor * in,
+    struct ggml_tensor       * out,
+    int   bits,
+    float x_range
+);
+
 #ifdef __cplusplus
 }
 #endif

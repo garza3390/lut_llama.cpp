@@ -65,6 +65,16 @@ echo "[run_version] === Ejecutando lut-bench-suite ==="
     --data-dir "$VERSION_DIR" \
     --iters 15
 
+# SiLU bench (independiente del GEMM, escribe a silu_bench_log.csv)
+if [ -x "$REPO_ROOT/build/bin/lut-bench-silu" ]; then
+    echo ""
+    echo "[run_version] === Ejecutando lut-bench-silu ==="
+    "$REPO_ROOT/build/bin/lut-bench-silu" \
+        --label "v${N}_silu_${DESCRIPTION}" \
+        --data-dir "$VERSION_DIR" \
+        --iters 30
+fi
+
 # Activar venv de Python si existe
 if [ -f "$HOME/.venv-lut/bin/activate" ]; then
     # shellcheck disable=SC1090

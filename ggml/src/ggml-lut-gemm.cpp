@@ -7,6 +7,10 @@
 #include <immintrin.h>
 #endif
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 // Debe coincidir con la definición en ggml-lut-quant.cpp
 struct ggml_lut_weight_data {
     uint8_t * w_q;
@@ -151,6 +155,12 @@ static void lut_gemm_kernel(
 
     const bool debug = (getenv("LUT_DEBUG") != nullptr);
 
+    // Paralelización sobre la matriz de salida (m, n). Cada hilo escribe en
+    // posiciones distintas de `out`, sin aliasing. Se desactiva en modo
+    // diagnóstico para que los prints conserven orden determinista.
+#if defined(_OPENMP)
+    #pragma omp parallel for collapse(2) schedule(static) if(!debug)
+#endif
     for (int m = 0; m < M; ++m) {
         for (int n = 0; n < N; ++n) {
             float acc_float = 0.0f;
